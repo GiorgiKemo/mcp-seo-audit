@@ -7,8 +7,10 @@ from typing import Any, Dict, List, Optional
 import logging
 import os
 import json
+import asyncio
 import time
 import math
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 import google.auth
@@ -67,11 +69,21 @@ CRUX_API_KEY = os.environ.get("CRUX_API_KEY", "")
 # Authentication helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
+_gsc_service_cache = None
+_indexing_service_cache = None
+
+
 def get_gsc_service():
-    """Returns an authorized Search Console service object."""
+    """Returns an authorized Search Console service object (cached)."""
+    global _gsc_service_cache
+    if _gsc_service_cache is not None:
+        return _gsc_service_cache
+
     if not SKIP_OAUTH:
         try:
-            return get_gsc_service_oauth()
+            svc = get_gsc_service_oauth()
+            _gsc_service_cache = svc
+            return svc
         except Exception:
             pass
 
@@ -81,7 +93,9 @@ def get_gsc_service():
                 creds = service_account.Credentials.from_service_account_file(
                     cred_path, scopes=GSC_SCOPES
                 )
-                return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+                svc = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+                _gsc_service_cache = svc
+                return svc
             except Exception:
                 continue
 
@@ -130,8 +144,12 @@ def get_gsc_service_oauth():
 
 
 def get_indexing_service():
-    """Returns an authorized Indexing API service object.
+    """Returns an authorized Indexing API service object (cached).
     Uses OAuth credentials with indexing scope, or service account."""
+    global _indexing_service_cache
+    if _indexing_service_cache is not None:
+        return _indexing_service_cache
+
     # Try service account first (recommended for Indexing API)
     for cred_path in POSSIBLE_CREDENTIAL_PATHS:
         if cred_path and os.path.exists(cred_path):
@@ -139,7 +157,9 @@ def get_indexing_service():
                 creds = service_account.Credentials.from_service_account_file(
                     cred_path, scopes=INDEXING_SCOPES
                 )
-                return build("indexing", "v3", credentials=creds, cache_discovery=False)
+                svc = build("indexing", "v3", credentials=creds, cache_discovery=False)
+                _indexing_service_cache = svc
+                return svc
             except Exception:
                 continue
 
@@ -162,7 +182,9 @@ def get_indexing_service():
             )
             if creds.expired:
                 creds.refresh(Request())
-            return build("indexing", "v3", credentials=creds, cache_discovery=False)
+            svc = build("indexing", "v3", credentials=creds, cache_discovery=False)
+            _indexing_service_cache = svc
+            return svc
         except Exception:
             pass
 
@@ -385,8 +407,10 @@ async def get_advanced_search_analytics(
         }
 
         metric_map = {"clicks": "CLICK_COUNT", "impressions": "IMPRESSION_COUNT", "ctr": "CTR", "position": "POSITION"}
+        direction_map = {"ascending": "ASCENDING", "descending": "DESCENDING"}
         if sort_by in metric_map:
-            request["orderBy"] = [{"metric": metric_map[sort_by], "direction": sort_direction.lower()}]
+            resolved_direction = direction_map.get(sort_direction.lower(), sort_direction.upper())
+            request["orderBy"] = [{"metric": metric_map[sort_by], "direction": resolved_direction}]
 
         active_filters = []
         if filters:
@@ -742,7 +766,7 @@ async def batch_inspect_urls(site_url: str, urls: str) -> str:
 
                 # Rate limiting: 600/min = 10/sec, be conservative
                 if i < len(url_list) - 1:
-                    time.sleep(0.15)
+                    await asyncio.sleep(0.15)
 
             except Exception as e:
                 categories["error"].append(f"{page_url}: {str(e)[:80]}")
@@ -942,7 +966,7 @@ async def batch_request_indexing(urls: str) -> str:
                     body={"url": url, "type": "URL_UPDATED"}
                 ).execute()
                 results["success"].append(url)
-                time.sleep(0.5)  # Rate limiting
+                await asyncio.sleep(0.5)  # Rate limiting
             except HttpError as e:
                 if e.resp.status == 429:
                     results["failed"].append(f"{url}: Rate limit exceeded")
@@ -1039,12 +1063,14 @@ async def get_core_web_vitals(url_or_origin: str, form_factor: str = "PHONE") ->
     import urllib.request
     import urllib.error
 
-    # Determine if it's a URL or origin
+    # Determine if it's a specific URL or an origin (no path beyond /)
     body = {"formFactor": form_factor.upper()}
-    if url_or_origin.count("/") > 2:  # Has a path beyond the origin
+    parsed = urlparse(url_or_origin)
+    has_path = parsed.path not in ("", "/")
+    if has_path:
         body["url"] = url_or_origin
     else:
-        body["origin"] = url_or_origin
+        body["origin"] = url_or_origin.rstrip("/")
 
     try:
         req = urllib.request.Request(
@@ -1094,8 +1120,10 @@ async def get_core_web_vitals(url_or_origin: str, form_factor: str = "PHONE") ->
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return f"No CrUX data available for {url_or_origin}. The site may not have enough traffic for Chrome to collect data."
-        body = e.read().decode() if hasattr(e, 'read') else str(e)
-        return f"CrUX API error (HTTP {e.code}): {body[:200]}"
+        error_body = e.read().decode() if hasattr(e, 'read') else str(e)
+        # Strip API key from error messages to avoid leaking it
+        safe_body = error_body.replace(CRUX_API_KEY, "[REDACTED]") if CRUX_API_KEY else error_body
+        return f"CrUX API error (HTTP {e.code}): {safe_body[:200]}"
     except Exception as e:
         return f"Error fetching Core Web Vitals: {str(e)}"
 
@@ -1319,7 +1347,8 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
 
         branded_rows = branded.get("rows", [])
         non_branded_rows = non_branded.get("rows", [])
-        total_row = total.get("rows", [{}])[0] if total.get("rows") else {}
+        total_rows = total.get("rows") or [{}]
+        total_row = total_rows[0] if total_rows else {}
 
         b_clicks, b_imp, b_ctr = sum_metrics(branded_rows)
         nb_clicks, nb_imp, nb_ctr = sum_metrics(non_branded_rows)
@@ -1459,7 +1488,7 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
                 if gc and uc and gc != uc:
                     issues.append(f"CANONICAL MISMATCH: {url} (Google chose {gc}, you declared {uc})")
 
-                time.sleep(0.15)
+                await asyncio.sleep(0.15)
             except Exception as e:
                 issues.append(f"INSPECT ERROR: {url} ({str(e)[:50]})")
 
@@ -1497,6 +1526,10 @@ async def reauthenticate() -> str:
     Deletes the current OAuth token and triggers a new browser auth flow.
     """
     try:
+        global _gsc_service_cache, _indexing_service_cache
+        _gsc_service_cache = None
+        _indexing_service_cache = None
+
         if os.path.exists(TOKEN_FILE):
             os.remove(TOKEN_FILE)
 
