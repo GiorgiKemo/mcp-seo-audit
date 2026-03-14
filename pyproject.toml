@@ -27,6 +27,9 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+[project.scripts]
+mcp-seo-audit = "gsc_server:main"
+
 [project.urls]
 "Homepage" = "https://github.com/GiorgiKemo/mcp-seo-audit"
 "Bug Tracker" = "https://github.com/GiorgiKemo/mcp-seo-audit/issues"

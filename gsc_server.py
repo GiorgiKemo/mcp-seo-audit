@@ -1550,5 +1550,10 @@ async def reauthenticate() -> str:
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the MCP server (used by pyproject.toml [project.scripts])."""
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
