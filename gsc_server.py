@@ -3,9 +3,19 @@ GSC MCP Server — Enhanced Fork
 Google Search Console + Indexing API + Core Web Vitals integration for MCP.
 """
 
+# ── Auto-activate .venv if running from system Python (e.g. Glama Docker) ────
+import os, sys, site
+_venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
+if os.path.isdir(_venv) and _venv not in sys.prefix:
+    _sp = os.path.join(_venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+    if not os.path.isdir(_sp):
+        # Windows or non-standard layout
+        _sp = os.path.join(_venv, "Lib", "site-packages")
+    if os.path.isdir(_sp):
+        site.addsitedir(_sp)
+
 from typing import Any, Dict, List, Optional
 import logging
-import os
 import json
 import asyncio
 import time
