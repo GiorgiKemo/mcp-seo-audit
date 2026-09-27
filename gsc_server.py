@@ -402,6 +402,18 @@ def _build_visible_content_soup(html: str) -> BeautifulSoup:
     return visible_soup
 
 
+def _is_decorative_or_hidden_image(image) -> bool:
+    """Whether an image is explicitly removed from the accessibility tree."""
+    for element in (image, *image.parents):
+        attrs = getattr(element, "attrs", {})
+        if "hidden" in attrs or _clean_text(element.get("aria-hidden", "")).lower() == "true":
+            return True
+        roles = _clean_text(element.get("role", "")).lower().split()
+        if "presentation" in roles or "none" in roles:
+            return True
+    return False
+
+
 def _seo_findings_from_analysis(analysis: Dict[str, Any]) -> List[Tuple[str, str]]:
     findings: List[Tuple[int, str, str]] = []
     seen: Set[str] = set()
@@ -445,7 +457,6 @@ def _seo_findings_from_analysis(analysis: Dict[str, Any]) -> List[Tuple[str, str
         elif (
             note.startswith("Multiple H1 tags found")
             or note.startswith("Thin visible content")
-            or note.startswith("Images with empty alt")
             or note.startswith("Links with empty anchor text")
         ):
             add("low", note)
@@ -735,6 +746,8 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
     images_empty_alt = []
     images_without_size = []
     for image in images:
+        if _is_decorative_or_hidden_image(image):
+            continue
         src = _clean_text(image.get("src") or image.get("data-src") or image.get("srcset") or "[inline image]")
         if not image.has_attr("alt"):
             images_missing_alt.append(src)
@@ -836,8 +849,6 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
         issues.append(f"Invalid JSON-LD scripts found ({invalid_json_ld_count})")
     if images_missing_alt:
         issues.append(f"Images missing alt text ({len(images_missing_alt)})")
-    if images_empty_alt:
-        notes.append(f"Images with empty alt text ({len(images_empty_alt)})")
     if images_without_size:
         notes.append(f"Images missing width or height attributes ({len(images_without_size)})")
     if anchors_missing_href:
@@ -2467,7 +2478,7 @@ async def analyze_page_seo(url: str) -> str:
                 "Images: "
                 f"{analysis['images']['total']} total, "
                 f"{len(analysis['images']['missing_alt'])} missing alt, "
-                f"{len(analysis['images']['empty_alt'])} empty alt"
+                f"{len(analysis['images']['empty_alt'])} marked decorative (empty alt)"
             ),
             (
                 "Links: "

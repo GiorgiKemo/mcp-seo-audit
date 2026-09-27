@@ -41,7 +41,6 @@ RULES = [
     ("Canonical", "canonical_review", "Check the canonical destination and use a consistent absolute indexable URL."),
     ("Invalid JSON-LD", "invalid_json_ld", "Repair the JSON syntax and validate supported structured data separately."),
     ("Images missing alt", "missing_image_alt", "Add descriptive alt text to meaningful images; use empty alt for decoration."),
-    ("Images with empty alt", "empty_image_alt", "Check that images with empty alt are decorative."),
     ("Images missing width", "image_dimensions", "Reserve image space using dimensions or CSS aspect-ratio to reduce layout shifts."),
     ("Anchors without href", "uncrawlable_link", "Use a real href for navigation or a button for actions."),
     ("Links with empty anchor", "empty_anchor", "Give the link an accessible name, including appropriate image alt text."),

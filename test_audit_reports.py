@@ -167,6 +167,16 @@ def test_parser_origin_and_image_link_alt_name():
     assert analysis["links"]["empty_text"] == []
 
 
+def test_parser_ignores_images_hidden_from_the_accessibility_tree():
+    analysis = gs._analyze_html_document(ORIGIN, 200, {}, html(body=
+        '<picture aria-hidden="true"><img src="/decorative.jpg" alt=""></picture>'
+        '<img src="/content.jpg" alt="">'))
+    assert analysis["images"]["total"] == 2
+    assert analysis["images"]["empty_alt"] == ["/content.jpg"]
+    assert analysis["images"]["missing_size"] == ["/content.jpg"]
+    assert not any("empty alt" in message.lower() for _, message in gs._seo_findings_from_analysis(analysis))
+
+
 def test_redirect_validator_blocks_out_of_origin_and_disallowed_target():
     async def fetch(url, **kwargs):
         if url.endswith("robots.txt"):
