@@ -1,9 +1,9 @@
 """
-GSC MCP Server — Enhanced Fork
+GSC MCP Server â€” Enhanced Fork
 Google Search Console + Indexing API + Core Web Vitals integration for MCP.
 """
 
-# ── Auto-activate .venv if running from system Python (e.g. Glama Docker) ────
+# â”€â”€ Auto-activate .venv if running from system Python (e.g. Glama Docker) â”€â”€â”€â”€
 import os, sys, site, glob
 _venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
 if os.path.isdir(_venv) and _venv not in sys.prefix:
@@ -22,16 +22,19 @@ import asyncio
 import time
 import math
 import gzip
+import io
 import re
 import shutil
 import subprocess
 import ipaddress
 import socket
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter, deque
 from html import unescape
-from urllib.parse import urlparse, urljoin, urlunsplit
+from urllib.parse import urlparse, urljoin, urlunsplit, urlsplit
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import google.auth
 from google.auth.transport.requests import Request
@@ -42,6 +45,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import httpx
 from bs4 import BeautifulSoup
+from seo_robots import RobotsPolicy
+from seo_google import execute_google, google_service
+from seo_network import safe_transport
+from seo_sitemaps import discover_sitemap_urls
+from seo_rendering import render_page, _run_lighthouse_process
+from seo_storage import data_directory
+from seo_monitoring import register_monitoring_tools
+from seo_reporting import build_audit_report, compare_audit_reports
 
 # Suppress the noisy file_cache warning from google-api-python-client.
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
@@ -49,12 +60,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 mcp = FastMCP("mcp-seo-audit")
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Configuration
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -69,7 +81,8 @@ OAUTH_CLIENT_SECRETS_FILE = os.environ.get("GSC_OAUTH_CLIENT_SECRETS_FILE")
 if not OAUTH_CLIENT_SECRETS_FILE:
     OAUTH_CLIENT_SECRETS_FILE = os.path.join(SCRIPT_DIR, "client_secrets.json")
 
-TOKEN_FILE = os.path.join(SCRIPT_DIR, "token.json")
+TOKEN_FILE = os.environ.get("GSC_TOKEN_FILE") or str(data_directory() / "token.json")
+LEGACY_TOKEN_FILE = os.path.join(SCRIPT_DIR, "token.json")
 SKIP_OAUTH = os.environ.get("GSC_SKIP_OAUTH", "").lower() in ("true", "1", "yes")
 
 _raw_data_state = os.environ.get("GSC_DATA_STATE", "all").lower().strip()
@@ -113,12 +126,13 @@ MAX_CRAWL_PAGES = int(os.environ.get("SEO_AUDIT_MAX_CRAWL_PAGES", "100"))
 ALLOW_PRIVATE_URLS = os.environ.get("SEO_AUDIT_ALLOW_PRIVATE_URLS", "").lower() in ("true", "1", "yes")
 ENABLE_WRITE_TOOLS = os.environ.get("SEO_AUDIT_ENABLE_WRITE_TOOLS", "").lower() in ("true", "1", "yes")
 ALLOW_NPX_LIGHTHOUSE = os.environ.get("SEO_AUDIT_ALLOW_NPX_LIGHTHOUSE", "").lower() in ("true", "1", "yes")
+ENABLE_LOCAL_LIGHTHOUSE = os.environ.get("SEO_AUDIT_ENABLE_LOCAL_LIGHTHOUSE", "").lower() in ("true", "1", "yes")
 LIGHTHOUSE_BINARY = os.environ.get("LIGHTHOUSE_BINARY", "")
 LIGHTHOUSE_NO_SANDBOX = os.environ.get("LIGHTHOUSE_NO_SANDBOX", "").lower() in ("true", "1", "yes")
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Authentication helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _gsc_service_cache = None
 _indexing_service_cache = None
@@ -161,23 +175,21 @@ def get_gsc_service_oauth():
     """Returns an authorized Search Console service object using OAuth."""
     creds = None
 
-    if os.path.exists(TOKEN_FILE):
+    token_source = TOKEN_FILE
+    if not os.environ.get("GSC_TOKEN_FILE") and not os.path.exists(token_source) and os.path.exists(LEGACY_TOKEN_FILE):
+        token_source = LEGACY_TOKEN_FILE
+    if os.path.exists(token_source):
         try:
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, ALL_SCOPES)
+            creds = Credentials.from_authorized_user_file(token_source, ALL_SCOPES)
         except Exception:
-            if os.path.exists(TOKEN_FILE):
-                os.remove(TOKEN_FILE)
             creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                with open(TOKEN_FILE, "w") as token:
-                    token.write(creds.to_json())
+                _save_oauth_token(creds)
             except Exception:
-                if os.path.exists(TOKEN_FILE):
-                    os.remove(TOKEN_FILE)
                 creds = None
 
         if not creds or not creds.valid:
@@ -187,9 +199,8 @@ def get_gsc_service_oauth():
                     "file in the script directory or set GSC_OAUTH_CLIENT_SECRETS_FILE."
                 )
             flow = InstalledAppFlow.from_client_secrets_file(OAUTH_CLIENT_SECRETS_FILE, ALL_SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open(TOKEN_FILE, "w") as token:
-                token.write(creds.to_json())
+            creds = flow.run_local_server(port=0, timeout_seconds=180, authorization_prompt_message="")
+            _save_oauth_token(creds)
 
     return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
@@ -215,13 +226,15 @@ def get_indexing_service():
                 continue
 
     # Fall back to OAuth with the same authorized-user token used by Search Console.
-    if os.path.exists(TOKEN_FILE):
+    token_source = TOKEN_FILE
+    if not os.environ.get("GSC_TOKEN_FILE") and not os.path.exists(token_source) and os.path.exists(LEGACY_TOKEN_FILE):
+        token_source = LEGACY_TOKEN_FILE
+    if os.path.exists(token_source):
         try:
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, ALL_SCOPES)
+            creds = Credentials.from_authorized_user_file(token_source, ALL_SCOPES)
             if not creds.valid and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
-                with open(TOKEN_FILE, "w") as token:
-                    token.write(creds.to_json())
+                _save_oauth_token(creds)
             if not creds.valid:
                 raise ValueError("OAuth token is invalid and cannot be refreshed.")
             svc = build("indexing", "v3", credentials=creds, cache_discovery=False)
@@ -281,7 +294,8 @@ def _url_matches_origin(url: str, origin: str) -> bool:
     parsed_origin = urlparse(_ensure_https_url(origin))
     return (
         parsed_url.scheme == parsed_origin.scheme
-        and parsed_url.netloc.lower() == parsed_origin.netloc.lower()
+        and parsed_url.hostname == parsed_origin.hostname
+        and (parsed_url.port or (443 if parsed_url.scheme == "https" else 80)) == (parsed_origin.port or (443 if parsed_origin.scheme == "https" else 80))
     )
 
 
@@ -348,7 +362,7 @@ def _hostname_resolves_to_local_or_private(hostname: str) -> bool:
     return False
 
 
-def _validate_fetchable_public_url(url: str) -> str:
+def _validate_fetchable_public_url(url: str, *, resolve_dns: bool = True) -> str:
     normalized = _ensure_https_url(url)
     parsed = urlparse(normalized)
     if parsed.scheme not in FETCH_ALLOWED_SCHEMES:
@@ -357,7 +371,8 @@ def _validate_fetchable_public_url(url: str) -> str:
         raise ValueError("A valid URL host is required.")
     if "@" in parsed.netloc:
         raise ValueError("URLs with embedded credentials are not allowed.")
-    if not ALLOW_PRIVATE_URLS and _hostname_resolves_to_local_or_private(parsed.hostname or ""):
+    if not ALLOW_PRIVATE_URLS and (_host_is_local_or_private(parsed.hostname or "") or
+                                  (resolve_dns and _hostname_resolves_to_local_or_private(parsed.hostname or ""))):
         raise ValueError(
             "Private, loopback, local, and reserved network targets are blocked by default. "
             "Set SEO_AUDIT_ALLOW_PRIVATE_URLS=true only for trusted local testing."
@@ -476,6 +491,8 @@ def _is_runtime_lighthouse_failure(result: str) -> bool:
 
 
 async def _build_lighthouse_fallback(url: str, strategy: str, categories: str, reason: str) -> str:
+    if not ENABLE_LOCAL_LIGHTHOUSE:
+        return reason
     lighthouse_result = await run_lighthouse_audit(url, form_factor=strategy, categories=categories)
     if _is_runtime_lighthouse_failure(lighthouse_result):
         return reason
@@ -486,10 +503,10 @@ def _canonicalize_crawl_url(base_url: str, href: str) -> Optional[str]:
     if not href:
         return None
     absolute = urljoin(base_url, href)
-    parsed = urlparse(absolute)
+    parsed = urlsplit(absolute)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", ""))
+    return urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
 
 
 def _buffer_decoded_response(response: httpx.Response, content: bytes) -> httpx.Response:
@@ -515,17 +532,21 @@ async def _fetch_url(
     method: str = "GET",
     follow_redirects: bool = True,
     headers: Optional[Dict[str, str]] = None,
+    redirect_validator: Any = None,
+    redirect_delay: float = 0,
 ) -> httpx.Response:
     request_headers = dict(DEFAULT_FETCH_HEADERS)
     if headers:
         request_headers.update(headers)
 
     async with httpx.AsyncClient(
+        transport=safe_transport(ALLOW_PRIVATE_URLS),
+        trust_env=False,
         follow_redirects=False,
         timeout=DEFAULT_FETCH_TIMEOUT,
         headers=request_headers,
     ) as client:
-        current_url = _validate_fetchable_public_url(url)
+        current_url = _validate_fetchable_public_url(url, resolve_dns=False)
         redirects_followed = 0
 
         while True:
@@ -538,8 +559,13 @@ async def _fetch_url(
                     location = response.headers.get("location")
                     if not location:
                         return _buffer_decoded_response(response, b"")
-                    current_url = _validate_fetchable_public_url(urljoin(str(response.url), location))
+                    next_url = urljoin(str(response.url), location)
+                    if redirect_validator is not None:
+                        redirect_validator(next_url)
+                    current_url = _validate_fetchable_public_url(next_url, resolve_dns=False)
                     redirects_followed += 1
+                    if redirect_delay:
+                        await asyncio.sleep(redirect_delay)
                     continue
 
                 chunks = []
@@ -620,13 +646,50 @@ def _parse_meta_tags(soup: BeautifulSoup) -> Dict[str, str]:
     for tag in soup.find_all("meta"):
         key = (tag.get("name") or tag.get("property") or "").strip().lower()
         value = _clean_text(tag.get("content"))
-        if key and value and key not in meta:
-            meta[key] = value
+        if key and value:
+            if key in {"robots", "googlebot"} and key in meta:
+                meta[key] += ", " + value
+            elif key not in meta:
+                meta[key] = value
     return meta
+
+
+def _json_ld_documents(soup: BeautifulSoup) -> List[Any]:
+    documents = []
+    for script in soup.find_all("script", type=re.compile(r"application/ld\+json", re.I)):
+        try:
+            documents.append(json.loads((script.string or script.get_text()).replace("<!--", "").replace("-->", "").strip()))
+        except (ValueError, TypeError, RecursionError):
+            continue
+    return documents
+
+
+def _googlebot_directives(robots_meta: str, googlebot_meta: str, x_robots: Any) -> Set[str]:
+    """Combine generic and Googlebot rules without applying other bots' headers."""
+    def tokens(value):
+        # Parameters such as max-image-preview: none are not standalone rules.
+        return {token for part in value.lower().split(",") if ":" not in part for token in part.split()}
+
+    directives = tokens(robots_meta) | tokens(googlebot_meta)
+    parameterized_rules = {"max-snippet", "max-image-preview", "max-video-preview", "unavailable_after"}
+    for header in ([x_robots] if isinstance(x_robots, str) else x_robots):
+        applies = True
+        for part in header.lower().split(","):
+            scoped = re.match(r"^\s*([a-z][a-z0-9_-]*)\s*:\s*(.*)$", part)
+            if scoped and scoped[1] not in parameterized_rules:
+                applies = scoped[1] == "googlebot"
+                part = scoped[2]
+            if applies:
+                directives.update(tokens(part))
+    if "none" in directives:
+        directives.update({"noindex", "nofollow"})
+    return directives
 
 
 def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, str], html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
+    base_tag = soup.find("base", href=True)
+    link_base = urljoin(final_url, base_tag["href"]) if base_tag else final_url
     visible_soup = _build_visible_content_soup(html)
     meta = _parse_meta_tags(soup)
     html_tag = soup.find("html")
@@ -654,10 +717,14 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
         "h2": [_clean_text(tag.get_text(" ", strip=True)) for tag in visible_soup.find_all("h2") if _clean_text(tag.get_text(" ", strip=True))],
     }
 
-    body_text = _clean_text(visible_soup.get_text(" ", strip=True))
+    # Head metadata is not visible page content. Fragments without <body> still work.
+    if visible_soup.head:
+        visible_soup.head.decompose()
+    body_text = _clean_text((visible_soup.body or visible_soup).get_text(" ", strip=True))
     structured_types = _parse_json_ld_types(soup)
     invalid_json_ld_count = _count_invalid_json_ld_scripts(soup)
-    x_robots = _clean_text(headers.get("x-robots-tag", ""))
+    x_robots_values = headers.get_list("x-robots-tag") if isinstance(headers, httpx.Headers) else [headers.get("x-robots-tag", "")]
+    x_robots = _clean_text(", ".join(x_robots_values))
     robots_meta = meta.get("robots", "")
     googlebot_meta = meta.get("googlebot", "")
     viewport_meta = meta.get("viewport", "")
@@ -684,13 +751,14 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
     final_origin = _origin_from_url(final_url)
     for anchor in anchors:
         href = _clean_text(anchor.get("href"))
-        text = _clean_text(anchor.get_text(" ", strip=True) or anchor.get("aria-label") or anchor.get("title"))
+        image_alt = " ".join(image.get("alt", "") for image in anchor.find_all("img"))
+        text = _clean_text(anchor.get_text(" ", strip=True) or anchor.get("aria-label") or image_alt or anchor.get("title"))
         if not href:
             anchors_missing_href.append(text or "[empty anchor]")
             continue
-        normalized_href = _canonicalize_crawl_url(final_url, href)
+        normalized_href = _canonicalize_crawl_url(link_base, href)
         if normalized_href:
-            if normalized_href.startswith(final_origin):
+            if _url_matches_origin(normalized_href, final_origin):
                 internal_links += 1
             else:
                 external_links += 1
@@ -738,12 +806,12 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
     else:
         notes.append("No canonical tag found")
 
-    indexability_signals = " | ".join(part for part in [robots_meta, googlebot_meta, x_robots] if part).lower()
-    if "noindex" in indexability_signals:
+    directives = _googlebot_directives(robots_meta, googlebot_meta, x_robots_values)
+    if "noindex" in directives:
         issues.append("Page is explicitly marked noindex")
-    if "nofollow" in indexability_signals:
+    if "nofollow" in directives:
         issues.append("Page instructs crawlers not to follow links")
-    if "nosnippet" in indexability_signals:
+    if "nosnippet" in directives:
         notes.append("Page limits search result snippets with nosnippet")
 
     if not headings["h1"]:
@@ -814,17 +882,29 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
             "empty_text": anchors_empty_text,
         },
         "invalid_json_ld_count": invalid_json_ld_count,
+        "nofollow": "nofollow" in directives,
+        "structured_data": _json_ld_documents(soup),
+        "alternate_languages": [
+            {"language": _clean_text(link.get("hreflang")), "url": urljoin(final_url, link.get("href", "")),
+             "raw_url": link.get("href", "")}
+            for link in (soup.head.find_all("link", hreflang=True, href=True) if soup.head else [])
+            if "alternate" in [str(rel).lower() for rel in link.get("rel", [])]
+        ],
     }
 
 
 def _iter_internal_links(final_url: str, html: str) -> List[str]:
-    soup = BeautifulSoup(html, "html.parser")
+    soup = _build_visible_content_soup(html)
+    base_tag = soup.find("base", href=True)
+    link_base = urljoin(final_url, base_tag["href"]) if base_tag else final_url
     parsed_final = urlparse(final_url)
     origin = f"{parsed_final.scheme}://{parsed_final.netloc}"
     links: List[str] = []
     seen: Set[str] = set()
     for anchor in soup.find_all("a", href=True):
-        normalized = _canonicalize_crawl_url(final_url, anchor["href"])
+        if "nofollow" in [str(rel).lower() for rel in anchor.get("rel", [])]:
+            continue
+        normalized = _canonicalize_crawl_url(link_base, anchor["href"])
         if not normalized:
             continue
         parsed = urlparse(normalized)
@@ -838,12 +918,15 @@ def _iter_internal_links(final_url: str, html: str) -> List[str]:
 
 def _extract_xml_text(response: httpx.Response) -> str:
     content = response.content
-    content_type = response.headers.get("content-type", "").lower()
-    if response.url.path.endswith(".gz") or "gzip" in content_type:
-        try:
-            content = gzip.decompress(content)
-        except Exception:
-            pass
+    # HTTP transfer decoding is already done by _fetch_url. Sitemap .gz files
+    # can contain another gzip layer, whose expanded size also needs a bound.
+    if content.startswith(b"\x1f\x8b"):
+        with gzip.GzipFile(fileobj=io.BytesIO(content)) as compressed:
+            content = compressed.read(MAX_FETCH_BYTES + 1)
+    if len(content) > MAX_FETCH_BYTES:
+        raise ValueError(
+            f"Sitemap exceeded SEO_AUDIT_MAX_FETCH_BYTES ({MAX_FETCH_BYTES} bytes) after decoding."
+        )
     return content.decode(response.encoding or "utf-8", errors="replace")
 
 
@@ -974,16 +1057,16 @@ def _summarize_lighthouse_payload(payload: Dict[str, Any], source_label: str) ->
     return "\n".join(lines)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Property Management Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def list_properties() -> str:
     """Retrieves and returns the user's Search Console properties."""
     try:
-        service = get_gsc_service()
-        site_list = service.sites().list().execute()
+        service = await google_service(get_gsc_service)
+        site_list = await execute_google(service.sites().list())
         sites = site_list.get("siteEntry", [])
 
         if not sites:
@@ -1000,7 +1083,7 @@ async def list_properties() -> str:
         return f"Error retrieving properties: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def add_site(site_url: str) -> str:
     """
     Add a site to your Search Console properties.
@@ -1012,8 +1095,8 @@ async def add_site(site_url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_gsc_service()
-        service.sites().add(siteUrl=site_url).execute()
+        service = await google_service(get_gsc_service)
+        await execute_google(service.sites().add(siteUrl=site_url), read_only=False)
         return f"Site {site_url} has been added to Search Console."
     except HttpError as e:
         error_code = e.resp.status
@@ -1024,7 +1107,7 @@ async def add_site(site_url: str) -> str:
         return f"Error adding site: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
 async def delete_site(site_url: str) -> str:
     """
     Remove a site from your Search Console properties.
@@ -1036,8 +1119,8 @@ async def delete_site(site_url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_gsc_service()
-        service.sites().delete(siteUrl=site_url).execute()
+        service = await google_service(get_gsc_service)
+        await execute_google(service.sites().delete(siteUrl=site_url), read_only=False)
         return f"Site {site_url} has been removed from Search Console."
     except HttpError as e:
         if e.resp.status == 404:
@@ -1047,11 +1130,71 @@ async def delete_site(site_url: str) -> str:
         return f"Error removing site: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Search Analytics Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+GSC_DIMENSIONS = {"query", "page", "device", "country", "date", "searchAppearance"}
+GSC_FILTER_DIMENSIONS = GSC_DIMENSIONS - {"date"}
+GSC_FILTER_OPERATORS = {"contains", "equals", "notContains", "notEquals", "includingRegex", "excludingRegex"}
+
+
+def _gsc_today():
+    """Search Console dates use Pacific time, including daylight saving time."""
+    return datetime.now(ZoneInfo("America/Los_Angeles")).date()
+
+
+def _gsc_date_window(days: int) -> Tuple[Any, Any]:
+    if not 1 <= days <= 500:
+        raise ValueError("days must be between 1 and 500.")
+    end_date = _gsc_today()
+    return end_date - timedelta(days=days - 1), end_date
+
+
+def _validate_gsc_dates(start_date: str, end_date: str) -> Tuple[Any, Any]:
+    values = []
+    for value in (start_date, end_date):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            raise ValueError("Dates must use YYYY-MM-DD format.") from None
+        if parsed.isoformat() != value:
+            raise ValueError("Dates must use YYYY-MM-DD format.")
+        values.append(parsed)
+    if values[0] > values[1]:
+        raise ValueError("start_date must be on or before end_date.")
+    return values[0], values[1]
+
+
+def _gsc_dimensions(dimensions: str) -> List[str]:
+    values = [value.strip() for value in dimensions.split(",")] if dimensions.strip() else []
+    if any(value not in GSC_DIMENSIONS for value in values) or len(values) != len(set(values)):
+        raise ValueError("dimensions must contain unique values from query, page, device, country, date, searchAppearance.")
+    return values
+
+
+def _gsc_search_type(search_type: str) -> str:
+    values = {"web": "web", "image": "image", "video": "video", "news": "news", "discover": "discover", "googlenews": "googleNews"}
+    value = values.get(search_type.strip().lower())
+    if value is None:
+        raise ValueError("search_type must be WEB, IMAGE, VIDEO, NEWS, DISCOVER, or googleNews.")
+    return value
+
+
+def _gsc_coverage_notes(response: Dict[str, Any], row_limit: int, data_state: str = DATA_STATE) -> List[str]:
+    notes = ["Coverage: returned Search Console rows only; query rows omit anonymized queries and API limits can omit additional rows."]
+    if row_limit > 0 and len(response.get("rows", [])) >= row_limit:
+        notes.append("Row limit reached; this result is a bounded sample, not a complete inventory.")
+    incomplete = response.get("metadata", {}).get("first_incomplete_date")
+    if incomplete:
+        notes.append(f"Freshness: data from {incomplete} onward is incomplete and may change.")
+    elif data_state == "all":
+        notes.append("Freshness: data_state=all includes recent data that may be incomplete and change.")
+    notes.append("Date boundaries are inclusive and use America/Los_Angeles (Pacific time).")
+    return notes
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_search_analytics(
     site_url: str,
     days: int = 28,
@@ -1070,21 +1213,23 @@ async def get_search_analytics(
         search_type: Type of search results (WEB, IMAGE, VIDEO, NEWS, DISCOVER)
     """
     try:
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
-        dimension_list = [d.strip() for d in dimensions.split(",")]
+        start_date, end_date = _gsc_date_window(days)
+        dimension_list = _gsc_dimensions(dimensions)
+        resolved_type = _gsc_search_type(search_type)
+        if row_limit < 1:
+            return "row_limit must be positive."
+        service = await google_service(get_gsc_service)
 
         request = {
             "startDate": start_date.strftime("%Y-%m-%d"),
             "endDate": end_date.strftime("%Y-%m-%d"),
             "dimensions": dimension_list,
             "rowLimit": min(max(1, row_limit), 500),
-            "searchType": search_type.upper(),
+            "type": resolved_type,
             "dataState": DATA_STATE,
         }
 
-        response = service.searchanalytics().query(siteUrl=site_url, body=request).execute()
+        response = await execute_google(service.searchanalytics().query(siteUrl=site_url, body=request))
 
         if not response.get("rows"):
             return f"No search analytics data found for {site_url} in the last {days} days."
@@ -1104,6 +1249,7 @@ async def get_search_analytics(
             data.append(f"{row.get('position', 0):.1f}")
             result_lines.append(" | ".join(data))
 
+        result_lines.extend(_gsc_coverage_notes(response, request["rowLimit"] if dimension_list else 0))
         return "\n".join(result_lines)
     except Exception as e:
         if "404" in str(e):
@@ -1111,7 +1257,7 @@ async def get_search_analytics(
         return f"Error retrieving search analytics: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_advanced_search_analytics(
     site_url: str,
     start_date: str = None,
@@ -1133,13 +1279,13 @@ async def get_advanced_search_analytics(
 
     Args:
         site_url: Exact GSC property URL (e.g. "sc-domain:example.com")
-        start_date: Start date YYYY-MM-DD (defaults to 28 days ago)
-        end_date: End date YYYY-MM-DD (defaults to today)
+        start_date: Inclusive start date YYYY-MM-DD (defaults to 28-day window ending at end_date)
+        end_date: Inclusive end date YYYY-MM-DD (defaults to today in Pacific time)
         dimensions: Dimensions comma-separated (query,page,device,country,date,searchAppearance)
         search_type: WEB, IMAGE, VIDEO, NEWS, DISCOVER
         row_limit: Max rows (up to 25000)
         start_row: Starting row for pagination
-        sort_by: Metric to sort by (clicks, impressions, ctr, position)
+        sort_by: Metric to sort returned API page locally (clicks, impressions, ctr, position)
         sort_direction: ascending or descending
         filter_dimension: Single filter dimension (query, page, country, device)
         filter_operator: contains, equals, notContains, notEquals, includingRegex, excludingRegex
@@ -1148,18 +1294,21 @@ async def get_advanced_search_analytics(
         data_state: "all" (default) or "final" (confirmed only, 2-3 day lag)
     """
     try:
-        service = get_gsc_service()
-
         if not end_date:
-            end_date = datetime.now().date().strftime("%Y-%m-%d")
+            end_date = _gsc_today().isoformat()
         if not start_date:
-            start_date = (datetime.now().date() - timedelta(days=28)).strftime("%Y-%m-%d")
+            _, parsed_end = _validate_gsc_dates(end_date, end_date)
+            start_date = (parsed_end - timedelta(days=27)).isoformat()
+        _validate_gsc_dates(start_date, end_date)
+        if row_limit < 1 or start_row < 0:
+            return "row_limit must be positive and start_row must be non-negative."
 
         resolved_data_state = (data_state or DATA_STATE).lower().strip()
         if resolved_data_state not in ("all", "final"):
             return f"Invalid data_state '{data_state}'. Use 'all' or 'final'."
 
-        dimension_list = [d.strip() for d in dimensions.split(",")]
+        dimension_list = _gsc_dimensions(dimensions)
+        resolved_type = _gsc_search_type(search_type)
 
         request = {
             "startDate": start_date,
@@ -1167,20 +1316,16 @@ async def get_advanced_search_analytics(
             "dimensions": dimension_list,
             "rowLimit": min(row_limit, 25000),
             "startRow": start_row,
-            "searchType": search_type.upper(),
+            "type": resolved_type,
             "dataState": resolved_data_state,
         }
 
-        metric_map = {"clicks": "CLICK_COUNT", "impressions": "IMPRESSION_COUNT", "ctr": "CTR", "position": "POSITION"}
-        direction_map = {
-            "ascending": "ASCENDING",
-            "asc": "ASCENDING",
-            "descending": "DESCENDING",
-            "desc": "DESCENDING",
-        }
-        if sort_by in metric_map:
-            resolved_direction = direction_map.get((sort_direction or "").lower().strip(), "DESCENDING")
-            request["orderBy"] = [{"metric": metric_map[sort_by], "direction": resolved_direction}]
+        if sort_by not in {"clicks", "impressions", "ctr", "position"}:
+            return "sort_by must be clicks, impressions, ctr, or position."
+        direction = (sort_direction or "").lower().strip()
+        if direction not in {"ascending", "asc", "descending", "desc"}:
+            return "sort_direction must be ascending, asc, descending, or desc."
+        descending = direction in {"descending", "desc"}
 
         active_filters = []
         if filters:
@@ -1191,16 +1336,22 @@ async def get_advanced_search_analytics(
             if not isinstance(filter_list, list) or not filter_list:
                 return "Expected a non-empty JSON array of filter objects."
             for f in filter_list:
-                if not all(k in f for k in ("dimension", "operator", "expression")):
+                if not isinstance(f, dict) or not all(k in f for k in ("dimension", "operator", "expression")):
                     return f"Each filter must have dimension, operator, expression. Invalid: {f}"
             request["dimensionFilterGroups"] = [{"filters": filter_list}]
             active_filters = filter_list
-        elif filter_dimension and filter_expression:
+        elif filter_dimension is not None or filter_expression is not None:
             single = {"dimension": filter_dimension, "operator": filter_operator, "expression": filter_expression}
             request["dimensionFilterGroups"] = [{"filters": [single]}]
             active_filters = [single]
 
-        response = service.searchanalytics().query(siteUrl=site_url, body=request).execute()
+        for item in active_filters:
+            if item["dimension"] not in GSC_FILTER_DIMENSIONS or item["operator"] not in GSC_FILTER_OPERATORS:
+                return "Invalid filter dimension or operator."
+            if not isinstance(item["expression"], str) or not item["expression"] or len(item["expression"]) > 4096:
+                return "Filter expression must be a non-empty string of at most 4096 characters."
+        service = await google_service(get_gsc_service)
+        response = await execute_google(service.searchanalytics().query(siteUrl=site_url, body=request))
 
         if not response.get("rows"):
             return f"No data found for {site_url} with the specified parameters."
@@ -1209,14 +1360,15 @@ async def get_advanced_search_analytics(
         if active_filters:
             filter_desc = " AND ".join(f"{f['dimension']} {f['operator']} '{f['expression']}'" for f in active_filters)
             result_lines.append(f"Filters: {filter_desc}")
-        result_lines.append(f"Rows {start_row + 1} to {start_row + len(response['rows'])} (sorted by {sort_by} {sort_direction})")
+        result_lines.append(f"API rows {start_row + 1} to {start_row + len(response['rows'])}; locally sorted by {sort_by} {direction} within this returned page.")
+        result_lines.append("API pagination follows clicks descending (date ascending when grouped by date); local sorting is not a global ranking.")
         result_lines.append("-" * 80)
 
         header = [d.capitalize() for d in dimension_list] + ["Clicks", "Impressions", "CTR", "Position"]
         result_lines.append(" | ".join(header))
         result_lines.append("-" * 80)
 
-        for row in response["rows"]:
+        for row in sorted(response["rows"], key=lambda item: item.get(sort_by, 0), reverse=descending):
             data = [v[:100] for v in row.get("keys", [])]
             data.append(str(row.get("clicks", 0)))
             data.append(str(row.get("impressions", 0)))
@@ -1224,8 +1376,9 @@ async def get_advanced_search_analytics(
             data.append(f"{row.get('position', 0):.1f}")
             result_lines.append(" | ".join(data))
 
-        if len(response["rows"]) == row_limit:
-            result_lines.append(f"\nMore results available. Use start_row: {start_row + row_limit}")
+        if len(response["rows"]) == request["rowLimit"]:
+            result_lines.append(f"\nMore results may be available. Use start_row: {start_row + request['rowLimit']}")
+        result_lines.extend(_gsc_coverage_notes(response, request["rowLimit"] if dimension_list else 0, resolved_data_state))
 
         return "\n".join(result_lines)
     except Exception as e:
@@ -1234,7 +1387,7 @@ async def get_advanced_search_analytics(
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_performance_overview(site_url: str, days: int = 28) -> str:
     """
     Get a performance overview with totals and daily trend.
@@ -1244,20 +1397,19 @@ async def get_performance_overview(site_url: str, days: int = 28) -> str:
         days: Number of days to look back (default: 28)
     """
     try:
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _gsc_date_window(days)
+        service = await google_service(get_gsc_service)
         date_range = {"startDate": start_date.strftime("%Y-%m-%d"), "endDate": end_date.strftime("%Y-%m-%d")}
 
-        total_response = service.searchanalytics().query(
+        total_response = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={**date_range, "dimensions": [], "rowLimit": 1, "dataState": DATA_STATE},
-        ).execute()
+        ))
 
-        date_response = service.searchanalytics().query(
+        date_response = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={**date_range, "dimensions": ["date"], "rowLimit": days, "dataState": DATA_STATE},
-        ).execute()
+        ))
 
         result_lines = [f"Performance Overview for {site_url} (last {days} days):", "-" * 80]
 
@@ -1281,6 +1433,7 @@ async def get_performance_overview(site_url: str, days: int = 28) -> str:
                     f"{row.get('ctr', 0) * 100:.2f}% | {row.get('position', 0):.1f}"
                 )
 
+        result_lines.extend(_gsc_coverage_notes(date_response, 0))
         return "\n".join(result_lines)
     except Exception as e:
         if "404" in str(e):
@@ -1288,7 +1441,7 @@ async def get_performance_overview(site_url: str, days: int = 28) -> str:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def compare_search_periods(
     site_url: str,
     period1_start: str,
@@ -1311,32 +1464,39 @@ async def compare_search_periods(
         limit: Top N results to compare (default: 20)
     """
     try:
-        service = get_gsc_service()
-        dimension_list = [d.strip() for d in dimensions.split(",")]
+        start1, end1 = _validate_gsc_dates(period1_start, period1_end)
+        start2, end2 = _validate_gsc_dates(period2_start, period2_end)
+        dimension_list = _gsc_dimensions(dimensions)
+        if not 1 <= limit <= 1000:
+            return "limit must be between 1 and 1000."
+        service = await google_service(get_gsc_service)
 
         base = {"dimensions": dimension_list, "rowLimit": 1000, "dataState": DATA_STATE}
-        p1 = service.searchanalytics().query(
+        p1 = await execute_google(service.searchanalytics().query(
             siteUrl=site_url, body={**base, "startDate": period1_start, "endDate": period1_end}
-        ).execute()
-        p2 = service.searchanalytics().query(
+        ))
+        p2 = await execute_google(service.searchanalytics().query(
             siteUrl=site_url, body={**base, "startDate": period2_start, "endDate": period2_end}
-        ).execute()
+        ))
 
-        p1_data = {tuple(r["keys"]): r for r in p1.get("rows", [])}
-        p2_data = {tuple(r["keys"]): r for r in p2.get("rows", [])}
+        p1_data = {tuple(r.get("keys", [])): r for r in p1.get("rows", [])}
+        p2_data = {tuple(r.get("keys", [])): r for r in p2.get("rows", [])}
         all_keys = set(p1_data) | set(p2_data)
 
         comparisons = []
         for key in all_keys:
-            r1 = p1_data.get(key, {"clicks": 0, "impressions": 0, "ctr": 0, "position": 0})
-            r2 = p2_data.get(key, {"clicks": 0, "impressions": 0, "ctr": 0, "position": 0})
-            click_diff = r2.get("clicks", 0) - r1.get("clicks", 0)
-            pos_diff = r1.get("position", 0) - r2.get("position", 0)  # positive = improved
-            comparisons.append({"key": key, "p1_clicks": r1.get("clicks", 0), "p2_clicks": r2.get("clicks", 0),
-                                "click_diff": click_diff, "p1_pos": r1.get("position", 0),
-                                "p2_pos": r2.get("position", 0), "pos_diff": pos_diff})
+            r1 = p1_data.get(key)
+            r2 = p2_data.get(key)
+            click_diff = r2.get("clicks", 0) - r1.get("clicks", 0) if r1 is not None and r2 is not None else None
+            p1_pos = r1.get("position") if r1 and r1.get("impressions", 0) > 0 else None
+            p2_pos = r2.get("position") if r2 and r2.get("impressions", 0) > 0 else None
+            pos_diff = p1_pos - p2_pos if p1_pos is not None and p2_pos is not None else None
+            comparisons.append({"key": key, "p1_clicks": r1.get("clicks", 0) if r1 is not None else None,
+                                "p2_clicks": r2.get("clicks", 0) if r2 is not None else None,
+                                "click_diff": click_diff, "p1_pos": p1_pos,
+                                "p2_pos": p2_pos, "pos_diff": pos_diff})
 
-        comparisons.sort(key=lambda x: abs(x["click_diff"]), reverse=True)
+        comparisons.sort(key=lambda x: (x["click_diff"] is not None, abs(x["click_diff"] or 0), x["key"]), reverse=True)
 
         result_lines = [
             f"Comparison for {site_url}:",
@@ -1346,14 +1506,26 @@ async def compare_search_periods(
             f"{' | '.join(d.capitalize() for d in dimension_list)} | P1 Clicks | P2 Clicks | Change | P1 Pos | P2 Pos | Pos Change",
             "-" * 100,
         ]
+        if (end1 - start1) != (end2 - start2):
+            result_lines.append("Warning: periods have unequal lengths; click totals are not normalized per day.")
+        result_lines.append("N/A means not returned or unavailable, not zero. Missing sampled rows do not prove a query was new or lost.")
 
         for item in comparisons[:limit]:
-            key_str = " | ".join(str(k)[:80] for k in item["key"])
+            key_str = " | ".join(str(k)[:80] for k in item["key"]) or "Property total"
+            p1_clicks = f"{item['p1_clicks']:g}" if item["p1_clicks"] is not None else "N/A"
+            p2_clicks = f"{item['p2_clicks']:g}" if item["p2_clicks"] is not None else "N/A"
+            click_change = f"{item['click_diff']:+g}" if item["click_diff"] is not None else "N/A"
+            p1_pos = f"{item['p1_pos']:.1f}" if item["p1_pos"] is not None else "N/A"
+            p2_pos = f"{item['p2_pos']:.1f}" if item["p2_pos"] is not None else "N/A"
+            pos_change = f"{item['pos_diff']:+.1f}" if item["pos_diff"] is not None else "N/A"
             result_lines.append(
-                f"{key_str} | {item['p1_clicks']} | {item['p2_clicks']} | {item['click_diff']:+d} | "
-                f"{item['p1_pos']:.1f} | {item['p2_pos']:.1f} | {item['pos_diff']:+.1f}"
+                f"{key_str} | {p1_clicks} | {p2_clicks} | {click_change} | {p1_pos} | {p2_pos} | {pos_change}"
             )
 
+        result_lines.append(f"Returned rows: period 1={len(p1_data)}, period 2={len(p2_data)}; maximum 1000 per period.")
+        result_lines.extend(_gsc_coverage_notes(p1, 1000))
+        if len(p2_data) >= 1000:
+            result_lines.append("Period 2 row limit reached; comparison is a bounded sample.")
         return "\n".join(result_lines)
     except Exception as e:
         if "404" in str(e):
@@ -1361,7 +1533,7 @@ async def compare_search_periods(
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_search_by_page_query(site_url: str, page_url: str, days: int = 28, row_limit: int = 20) -> str:
     """
     Get search queries driving traffic to a specific page.
@@ -1373,11 +1545,12 @@ async def get_search_by_page_query(site_url: str, page_url: str, days: int = 28,
         row_limit: Rows to return (default: 20, max: 500)
     """
     try:
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _gsc_date_window(days)
+        if row_limit < 1:
+            return "row_limit must be positive."
+        service = await google_service(get_gsc_service)
 
-        response = service.searchanalytics().query(
+        response = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={
                 "startDate": start_date.strftime("%Y-%m-%d"),
@@ -1385,10 +1558,9 @@ async def get_search_by_page_query(site_url: str, page_url: str, days: int = 28,
                 "dimensions": ["query"],
                 "dimensionFilterGroups": [{"filters": [{"dimension": "page", "operator": "equals", "expression": page_url}]}],
                 "rowLimit": min(max(1, row_limit), 500),
-                "orderBy": [{"metric": "CLICK_COUNT", "direction": "descending"}],
                 "dataState": DATA_STATE,
             },
-        ).execute()
+        ))
 
         if not response.get("rows"):
             return f"No search data found for {page_url} in the last {days} days."
@@ -1406,18 +1578,19 @@ async def get_search_by_page_query(site_url: str, page_url: str, days: int = 28,
         total_clicks = sum(r.get("clicks", 0) for r in response["rows"])
         total_imp = sum(r.get("impressions", 0) for r in response["rows"])
         result_lines.append("-" * 80)
-        result_lines.append(f"TOTAL | {total_clicks} | {total_imp} | {(total_clicks / total_imp * 100) if total_imp else 0:.2f}%")
+        result_lines.append(f"RETURNED ROWS TOTAL | {total_clicks} | {total_imp} | {(total_clicks / total_imp * 100) if total_imp else 0:.2f}%")
+        result_lines.extend(_gsc_coverage_notes(response, min(row_limit, 500)))
 
         return "\n".join(result_lines)
     except Exception as e:
         return f"Error: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # URL Inspection Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def inspect_url(site_url: str, page_url: str) -> str:
     """
     Inspect a URL for indexing status, rich results, and mobile usability.
@@ -1427,10 +1600,10 @@ async def inspect_url(site_url: str, page_url: str) -> str:
         page_url: The specific URL to inspect
     """
     try:
-        service = get_gsc_service()
-        response = service.urlInspection().index().inspect(
+        service = await google_service(get_gsc_service)
+        response = await execute_google(service.urlInspection().index().inspect(
             body={"inspectionUrl": page_url, "siteUrl": site_url}
-        ).execute()
+        ))
 
         if not response or "inspectionResult" not in response:
             return f"No inspection data found for {page_url}."
@@ -1484,7 +1657,7 @@ async def inspect_url(site_url: str, page_url: str) -> str:
         return f"Error inspecting URL: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def batch_inspect_urls(site_url: str, urls: str) -> str:
     """
     Inspect multiple URLs for indexing status. Handles rate limiting automatically.
@@ -1495,7 +1668,7 @@ async def batch_inspect_urls(site_url: str, urls: str) -> str:
         urls: List of URLs to inspect, one per line
     """
     try:
-        service = get_gsc_service()
+        service = await google_service(get_gsc_service)
         url_list = [u.strip() for u in urls.split("\n") if u.strip()]
 
         if not url_list:
@@ -1509,9 +1682,9 @@ async def batch_inspect_urls(site_url: str, urls: str) -> str:
 
         for i, page_url in enumerate(url_list):
             try:
-                response = service.urlInspection().index().inspect(
+                response = await execute_google(service.urlInspection().index().inspect(
                     body={"inspectionUrl": page_url, "siteUrl": site_url}
-                ).execute()
+                ))
 
                 idx = response.get("inspectionResult", {}).get("indexStatusResult", {})
                 verdict = idx.get("verdict", "UNKNOWN")
@@ -1563,11 +1736,11 @@ async def batch_inspect_urls(site_url: str, urls: str) -> str:
         return f"Error: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Sitemap Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_sitemaps(site_url: str) -> str:
     """
     List all sitemaps for a property with detailed info.
@@ -1576,8 +1749,8 @@ async def get_sitemaps(site_url: str) -> str:
         site_url: Exact GSC property URL
     """
     try:
-        service = get_gsc_service()
-        sitemaps = service.sitemaps().list(siteUrl=site_url).execute()
+        service = await google_service(get_gsc_service)
+        sitemaps = await execute_google(service.sitemaps().list(siteUrl=site_url))
 
         if not sitemaps.get("sitemap"):
             return f"No sitemaps found for {site_url}."
@@ -1613,7 +1786,7 @@ async def get_sitemaps(site_url: str) -> str:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 async def submit_sitemap(site_url: str, sitemap_url: str) -> str:
     """
     Submit or resubmit a sitemap to Google.
@@ -1626,14 +1799,14 @@ async def submit_sitemap(site_url: str, sitemap_url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_gsc_service()
-        service.sitemaps().submit(siteUrl=site_url, feedpath=sitemap_url).execute()
+        service = await google_service(get_gsc_service)
+        await execute_google(service.sitemaps().submit(siteUrl=site_url, feedpath=sitemap_url), read_only=False)
         return f"Successfully submitted sitemap: {sitemap_url}\nGoogle will queue it for processing."
     except Exception as e:
         return f"Error submitting sitemap: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
 async def delete_sitemap(site_url: str, sitemap_url: str) -> str:
     """
     Delete (unsubmit) a sitemap from Google Search Console.
@@ -1646,18 +1819,18 @@ async def delete_sitemap(site_url: str, sitemap_url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_gsc_service()
-        service.sitemaps().delete(siteUrl=site_url, feedpath=sitemap_url).execute()
+        service = await google_service(get_gsc_service)
+        await execute_google(service.sitemaps().delete(siteUrl=site_url, feedpath=sitemap_url), read_only=False)
         return f"Deleted sitemap: {sitemap_url}\nAlready-indexed URLs will remain in Google's index."
     except Exception as e:
         return f"Error deleting sitemap: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NEW: Google Indexing API Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 async def request_indexing(url: str) -> str:
     """
     Request Google to crawl and index a URL via the Indexing API.
@@ -1671,16 +1844,19 @@ async def request_indexing(url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_indexing_service()
-        response = service.urlNotifications().publish(
+        service = await google_service(get_indexing_service)
+        response = await execute_google(service.urlNotifications().publish(
             body={"url": url, "type": "URL_UPDATED"}
-        ).execute()
+        ), read_only=False)
 
         notify_time = response.get("urlNotificationMetadata", {}).get("latestUpdate", {}).get("notifyTime", "unknown")
-        return f"Indexing requested for: {url}\nNotification time: {notify_time}\nGoogle will crawl this URL soon."
+        return (
+            f"Indexing requested for: {url}\nNotification time: {notify_time}\n"
+            "Google accepted the notification. Crawling and indexing are not guaranteed."
+        )
     except HttpError as e:
         if e.resp.status == 429:
-            return f"Rate limit exceeded. You've hit the daily quota (default 200/day). Try again tomorrow."
+            return "Rate limit exceeded. Check your project's Indexing API quotas and retry after the applicable limit resets."
         elif e.resp.status == 403:
             return (
                 f"Permission denied for Indexing API. Ensure:\n"
@@ -1693,7 +1869,7 @@ async def request_indexing(url: str) -> str:
         return f"Error requesting indexing: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
 async def request_removal(url: str) -> str:
     """
     Request Google to remove a URL from the index via the Indexing API.
@@ -1706,15 +1882,18 @@ async def request_removal(url: str) -> str:
     if gate:
         return gate
     try:
-        service = get_indexing_service()
-        response = service.urlNotifications().publish(
+        service = await google_service(get_indexing_service)
+        response = await execute_google(service.urlNotifications().publish(
             body={"url": url, "type": "URL_DELETED"}
-        ).execute()
+        ), read_only=False)
 
-        return f"Removal requested for: {url}\nGoogle will process this request."
+        return (
+            f"Removal requested for: {url}\n"
+            "Google accepted the deletion notification. This does not confirm removal from search results."
+        )
     except HttpError as e:
         if e.resp.status == 429:
-            return "Rate limit exceeded. Try again tomorrow."
+            return "Rate limit exceeded. Check your project's Indexing API quotas and retry after the applicable limit resets."
         elif e.resp.status == 403:
             return "Permission denied. Ensure the Indexing API is enabled and you have Owner permission."
         return f"Error (HTTP {e.resp.status}): {str(e)}"
@@ -1722,7 +1901,7 @@ async def request_removal(url: str) -> str:
         return f"Error requesting removal: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 async def batch_request_indexing(urls: str) -> str:
     """
     Request indexing for multiple URLs. Processes sequentially with rate limiting.
@@ -1735,46 +1914,53 @@ async def batch_request_indexing(urls: str) -> str:
     if gate:
         return gate
     try:
-        service = get_indexing_service()
         url_list = [u.strip() for u in urls.split("\n") if u.strip()]
 
         if not url_list:
             return "No URLs provided."
         if len(url_list) > 100:
-            return f"Too many URLs ({len(url_list)}). Max 100 per batch (API quota is 200/day)."
+            return f"Too many URLs ({len(url_list)}). Max 100 per batch."
 
-        results = {"success": [], "failed": []}
+        service = await google_service(get_indexing_service)
+        results = {"success": [], "failed": [], "not_attempted": []}
 
-        for url in url_list:
+        for index, url in enumerate(url_list):
             try:
-                service.urlNotifications().publish(
+                await execute_google(service.urlNotifications().publish(
                     body={"url": url, "type": "URL_UPDATED"}
-                ).execute()
+                ), read_only=False)
                 results["success"].append(url)
                 await asyncio.sleep(0.5)  # Rate limiting
             except HttpError as e:
                 if e.resp.status == 429:
                     results["failed"].append(f"{url}: Rate limit exceeded")
+                    results["not_attempted"] = url_list[index + 1:]
                     break  # Stop on rate limit
                 results["failed"].append(f"{url}: HTTP {e.resp.status}")
             except Exception as e:
                 results["failed"].append(f"{url}: {str(e)[:60]}")
 
         lines = [f"Batch Indexing Results:", "-" * 60,
-                 f"Submitted: {len(results['success'])}", f"Failed: {len(results['failed'])}"]
+                 f"Requested: {len(url_list)}", f"Submitted: {len(results['success'])}",
+                 f"Failed: {len(results['failed'])}", f"Not attempted: {len(results['not_attempted'])}"]
 
         if results["failed"]:
             lines.append("\nFailed URLs:")
             for f in results["failed"]:
                 lines.append(f"  - {f}")
 
-        lines.append(f"\nRemaining daily quota: ~{200 - len(results['success'])}")
+        if results["not_attempted"]:
+            lines.append("\nNot attempted after the rate limit response:")
+            for pending_url in results["not_attempted"]:
+                lines.append(f"  - {pending_url}")
+        lines.append("\nSubmitted means Google accepted the notification; crawling and indexing are not guaranteed.")
+        lines.append("Remaining project quota is not available from these responses.")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def check_indexing_notification(url: str) -> str:
     """
     Check the latest indexing notification status for a URL.
@@ -1783,8 +1969,8 @@ async def check_indexing_notification(url: str) -> str:
         url: The URL to check
     """
     try:
-        service = get_indexing_service()
-        response = service.urlNotifications().getMetadata(url=url).execute()
+        service = await google_service(get_indexing_service)
+        response = await execute_google(service.urlNotifications().getMetadata(url=url))
 
         lines = [f"Indexing notification status for: {url}", "-" * 60]
 
@@ -1808,9 +1994,9 @@ async def check_indexing_notification(url: str) -> str:
         return f"Error: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NEW: Core Web Vitals (CrUX API)
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _format_crux_metric(metric_data: dict, name: str) -> str:
     """Format a single CrUX metric."""
@@ -1828,11 +2014,24 @@ def _format_crux_metric(metric_data: dict, name: str) -> str:
     return f"  {name}: p75={p75} | Good: {good:.0f}% | Needs Improvement: {needs_improvement:.0f}% | Poor: {poor:.0f}%"
 
 
-@mcp.tool()
+def _redact_api_keys(message: str) -> str:
+    """Redact configured API keys before clipping or returning provider errors."""
+    safe_message = str(message)
+    for api_key in (CRUX_API_KEY, PAGESPEED_API_KEY):
+        if api_key:
+            safe_message = safe_message.replace(api_key, "[REDACTED]")
+    return re.sub(
+        r"(?i)(\b(?:key|api_key|access_token|client_secret)=)[^&\s<>\"']+",
+        r"\1[REDACTED]",
+        safe_message,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_core_web_vitals(url_or_origin: str, form_factor: str = "PHONE") -> str:
     """
     Get Core Web Vitals (LCP, INP, CLS) from the Chrome UX Report (CrUX) API.
-    Free API, no OAuth needed — just a CRUX_API_KEY env variable.
+    Free API, no OAuth needed â€” just a CRUX_API_KEY env variable.
 
     Args:
         url_or_origin: Full URL or origin (e.g. "https://example.com" for origin-level)
@@ -1885,21 +2084,26 @@ async def get_core_web_vitals(url_or_origin: str, form_factor: str = "PHONE") ->
         lines.append(_format_crux_metric(metrics.get("first_contentful_paint"), "FCP (First Contentful Paint)"))
         lines.append(_format_crux_metric(metrics.get("experimental_time_to_first_byte"), "TTFB (Time to First Byte)"))
 
-        # Overall assessment
-        lcp_p75 = metrics.get("largest_contentful_paint", {}).get("percentiles", {}).get("p75", 99999)
-        inp_p75 = metrics.get("interaction_to_next_paint", {}).get("percentiles", {}).get("p75", 99999)
-        cls_p75 = metrics.get("cumulative_layout_shift", {}).get("percentiles", {}).get("p75", 99999)
-
         lines.append("\n--- Assessment ---")
-        lcp_ok = lcp_p75 <= 2500 if isinstance(lcp_p75, (int, float)) else False
-        inp_ok = inp_p75 <= 200 if isinstance(inp_p75, (int, float)) else False
-        cls_ok = cls_p75 <= 0.1 if isinstance(cls_p75, (int, float)) else False
+        assessments = []
+        for metric, label, threshold, unit in (
+            ("largest_contentful_paint", "LCP", 2500, "ms"),
+            ("interaction_to_next_paint", "INP", 200, "ms"),
+            ("cumulative_layout_shift", "CLS", 0.1, ""),
+        ):
+            raw_p75 = metrics.get(metric, {}).get("percentiles", {}).get("p75")
+            try:
+                p75 = float(raw_p75)
+                available = not isinstance(raw_p75, bool) and math.isfinite(p75) and p75 >= 0
+            except (TypeError, ValueError):
+                available = False
+            assessment = ("GOOD" if p75 <= threshold else "NEEDS WORK") if available else "NO DATA"
+            assessments.append(assessment)
+            lines.append(f"{label}: {assessment} (threshold: {threshold}{unit})")
 
-        lines.append(f"LCP: {'GOOD' if lcp_ok else 'NEEDS WORK'} (threshold: 2500ms)")
-        lines.append(f"INP: {'GOOD' if inp_ok else 'NEEDS WORK'} (threshold: 200ms)")
-        lines.append(f"CLS: {'GOOD' if cls_ok else 'NEEDS WORK'} (threshold: 0.1)")
-
-        if lcp_ok and inp_ok and cls_ok:
+        if "NO DATA" in assessments:
+            lines.append("\nOverall: INSUFFICIENT DATA to assess Core Web Vitals")
+        elif all(assessment == "GOOD" for assessment in assessments):
             lines.append("\nOverall: PASSING Core Web Vitals")
         else:
             lines.append("\nOverall: FAILING Core Web Vitals")
@@ -1907,19 +2111,17 @@ async def get_core_web_vitals(url_or_origin: str, form_factor: str = "PHONE") ->
         return "\n".join(lines)
 
     except httpx.HTTPStatusError as e:
-        error_body = e.response.text
-        # Strip API key from error messages to avoid leaking it
-        safe_body = error_body.replace(CRUX_API_KEY, "[REDACTED]") if CRUX_API_KEY else error_body
+        safe_body = _redact_api_keys(e.response.text)
         return f"CrUX API error (HTTP {e.response.status_code}): {safe_body[:200]}"
     except Exception as e:
-        return f"Error fetching Core Web Vitals: {str(e)}"
+        return f"Error fetching Core Web Vitals: {_redact_api_keys(str(e))}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NEW: SEO Analysis Tools
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_pagespeed_insights(
     url: str,
     strategy: str = "mobile",
@@ -1973,8 +2175,7 @@ async def get_pagespeed_insights(
             lines.extend(_format_loading_experience(origin_data, "Origin field data"))
         return "\n".join(lines)
     except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:300]
-        safe_body = body.replace(PAGESPEED_API_KEY, "[REDACTED]") if PAGESPEED_API_KEY else body
+        safe_body = _redact_api_keys(exc.response.text)[:300]
         if exc.response.status_code == 429:
             guidance = (
                 " PageSpeed quota was exceeded. "
@@ -1993,25 +2194,31 @@ async def get_pagespeed_insights(
             normalized_url,
             strategy_value,
             ",".join(selected_categories),
-            f"Error running PageSpeed Insights: {str(exc)}",
+            f"Error running PageSpeed Insights: {_redact_api_keys(str(exc))}",
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def run_lighthouse_audit(
     url: str,
     form_factor: str = "mobile",
     categories: str = "performance,seo,accessibility,best-practices",
 ) -> str:
     """
-    Run a local Lighthouse CLI audit via npx.
-    Requires Node.js plus a locally available Chrome/Chromium browser.
+    Run a local Lighthouse CLI audit for an explicitly trusted URL.
+    Requires SEO_AUDIT_ENABLE_LOCAL_LIGHTHOUSE=true, Node.js and Chrome/Chromium.
+    Lighthouse browser networking is not guarded by the public crawl transport.
 
     Args:
         url: Full page URL
         form_factor: mobile or desktop
         categories: Comma-separated Lighthouse categories
     """
+    if not ENABLE_LOCAL_LIGHTHOUSE:
+        return (
+            "Local Lighthouse disabled. Set SEO_AUDIT_ENABLE_LOCAL_LIGHTHOUSE=true only for trusted sites; "
+            "its browser can access the host network. Use PageSpeed Insights for untrusted public URLs."
+        )
     normalized_url = _ensure_https_url(url)
     strategy_value = form_factor.lower().strip()
     if strategy_value not in {"mobile", "desktop"}:
@@ -2069,13 +2276,7 @@ async def run_lighthouse_audit(
         command.append(f"--chrome-path={LIGHTHOUSE_CHROME_PATH}")
 
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
+        result = await _run_lighthouse_process(command, timeout=180)
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
             if not stderr and result.stdout:
@@ -2096,7 +2297,7 @@ async def run_lighthouse_audit(
         return f"Error running local Lighthouse: {str(exc)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def inspect_robots_txt(url_or_origin: str) -> str:
     """
     Fetch and summarize the site's robots.txt file.
@@ -2170,7 +2371,7 @@ async def inspect_robots_txt(url_or_origin: str) -> str:
         return f"Error inspecting robots.txt: {str(exc)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def analyze_sitemap(sitemap_url: str, sample_urls: int = 5) -> str:
     """
     Fetch and analyze an XML sitemap or sitemap index.
@@ -2224,7 +2425,7 @@ async def analyze_sitemap(sitemap_url: str, sample_urls: int = 5) -> str:
         return f"Error analyzing sitemap: {str(exc)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def analyze_page_seo(url: str) -> str:
     """
     Fetch a page and analyze on-page SEO signals, structured data, and indexability hints.
@@ -2246,7 +2447,7 @@ async def analyze_page_seo(url: str) -> str:
                 "Response is not HTML, so on-page SEO analysis was skipped."
             )
 
-        analysis = _analyze_html_document(final_url, response.status_code, dict(response.headers), response.text)
+        analysis = _analyze_html_document(final_url, response.status_code, response.headers, response.text)
         findings = _seo_findings_from_analysis(analysis)
         lines = [
             f"Page SEO analysis for {normalized_url}",
@@ -2294,35 +2495,137 @@ async def analyze_page_seo(url: str) -> str:
         return f"Error analyzing page SEO: {str(exc)}"
 
 
-@mcp.tool()
-async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
-    """
-    Crawl a site from a start URL and aggregate common technical/on-page SEO issues.
+async def _load_crawl_robots(origin: str):
+    """Fail closed for temporary errors; missing robots.txt does not prohibit crawling."""
+    url = origin.rstrip("/") + "/robots.txt"
+    try:
+        response = await _fetch_url(url)
+        status = response.status_code
+        if status == 429 or status >= 500 or 300 <= status < 400:
+            return None, {"url": url, "status": status, "state": "unavailable"}
+        policy = RobotsPolicy(response.text if 200 <= status < 300 else "")
+        return policy, {"url": url, "status": status, "state": "loaded" if status < 300 else "missing",
+                        "truncated": policy.truncated, "sitemaps": [
+                            line.strip().split(":", 1)[1].split("#", 1)[0].strip()
+                            for line in response.text[:500 * 1024].splitlines()
+                            if line.strip().lower().startswith("sitemap:")
+                        ][:20] if 200 <= status < 300 else []}
+    except Exception as exc:
+        return None, {"url": url, "state": "unavailable", "error": str(exc)}
 
-    Args:
-        start_url: First URL to crawl
-        max_pages: Maximum number of same-origin HTML pages to crawl
-    """
+
+async def _crawl_site_data(start_url: str, max_pages: int, respect_robots: bool = True,
+                          render_mode: str = "raw", include_sitemaps: bool = False,
+                          max_seconds: int = 180) -> Dict[str, Any]:
+    if render_mode not in {"raw", "rendered", "compare"}:
+        raise ValueError("render_mode must be raw, rendered, or compare.")
+    if not 5 <= max_seconds <= 600:
+        raise ValueError("max_seconds must be between 5 and 600.")
+    deadline = time.monotonic() + max_seconds
     normalized_start = _ensure_https_url(start_url)
+    parsed_start = urlsplit(normalized_start)
+    if parsed_start.scheme not in FETCH_ALLOWED_SCHEMES or not parsed_start.hostname or parsed_start.username:
+        raise ValueError("A valid http(s) URL without embedded credentials is required.")
+    normalized_start = urlunsplit((parsed_start.scheme, parsed_start.netloc.lower(), parsed_start.path or "/", parsed_start.query, ""))
     max_pages = max(1, min(max_pages, MAX_CRAWL_PAGES))
     origin = _origin_from_url(normalized_start)
     queue = deque([normalized_start])
     visited: Set[str] = set()
+    discovered = {normalized_start}
+    depths = {normalized_start: 0}
+    inbound = {}
+    final_seen = set()
+    blocked = []
+    omitted = 0
+    termination = "frontier_exhausted"
     page_summaries = []
-    duplicate_titles: Counter[str] = Counter()
-    duplicate_descriptions: Counter[str] = Counter()
+    policy = RobotsPolicy("")
+    robots = {"state": "ignored_by_request"}
+    if respect_robots:
+        policy, robots = await _load_crawl_robots(origin)
+        if policy is None:
+            termination = "robots_unavailable"
+        elif policy.crawl_delay is not None and policy.crawl_delay > 10:
+            termination = "crawl_delay_exceeds_budget"
+    delay = max(0.2, (policy.crawl_delay or 0)) if policy is not None else 0.2
 
-    while queue and len(visited) < max_pages:
+    def validate_redirect(target):
+        if not _url_matches_origin(target, origin):
+            raise ValueError(f"External redirect blocked before fetch: {target}")
+        if respect_robots and not policy.can_fetch(target):
+            raise ValueError(f"Redirect blocked by robots.txt: {target}")
+
+    sitemap_inventory = None
+    sitemap_urls = set()
+    if include_sitemaps and termination == "frontier_exhausted":
+        async def fetch_sitemap(target):
+            validate_redirect(target)
+            await asyncio.sleep(delay)
+            return await _fetch_url(target, redirect_validator=validate_redirect, redirect_delay=delay)
+        try:
+            async with asyncio.timeout(min(45, max(0.1, deadline - time.monotonic()))):
+                sitemap_inventory = await discover_sitemap_urls(
+                    origin, fetch_sitemap, seeds=robots.get("sitemaps") or None,
+                    max_sitemaps=10, max_urls=max_pages * 20,
+                )
+            sitemap_urls = set(sitemap_inventory["known_urls"])
+        except Exception as exc:
+            sitemap_inventory = {"known_urls": [], "coverage": {"complete_for_scope": False}, "error": str(exc)}
+
+    resource_policies = {origin: policy}
+    resource_next_fetch = {}
+    render_pace_lock = asyncio.Lock()
+    async def validate_resource(target):
+        if not respect_robots:
+            return
+        resource_origin = _origin_from_url(target)
+        async with render_pace_lock:
+            if resource_origin not in resource_policies:
+                if len(resource_policies) >= 8:
+                    raise ValueError("Rendering resource-origin limit reached.")
+                resource_policy, _ = await _load_crawl_robots(resource_origin)
+                resource_policies[resource_origin] = resource_policy
+            resource_policy = resource_policies[resource_origin]
+            if resource_policy is None or not resource_policy.can_fetch(target):
+                raise ValueError("Resource blocked by robots.txt or unavailable robots policy.")
+            resource_delay = max(0.2, resource_policy.crawl_delay or 0)
+            if resource_delay > 10:
+                raise ValueError("Resource crawl-delay exceeds rendering budget.")
+            await asyncio.sleep(max(0, resource_next_fetch.get(resource_origin, 0) - time.monotonic()))
+            resource_next_fetch[resource_origin] = time.monotonic() + resource_delay
+
+    seeded = False
+
+    while (queue or (include_sitemaps and not seeded)) and len(visited) < max_pages and termination == "frontier_exhausted":
+        if not queue:
+            seeded = True
+            for candidate in sorted(sitemap_urls - discovered):
+                discovered.add(candidate)
+                depths[candidate] = None
+                queue.append(candidate)
+        if not queue:
+            break
+        if time.monotonic() >= deadline:
+            termination = "time_budget"
+            break
         current = queue.popleft()
         if current in visited:
             continue
+        if respect_robots and not policy.can_fetch(current):
+            blocked.append(current)
+            continue
+        if visited:
+            await asyncio.sleep(delay)
         visited.add(current)
 
         try:
-            response = await _fetch_url(current)
+            async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
+                response = await _fetch_url(current, redirect_validator=validate_redirect, redirect_delay=delay)
             final_url = str(response.url)
+            common = {"requested_url": current, "depth": depths[current], "linked_from": []}
             if not _url_matches_origin(final_url, origin):
                 page_summaries.append({
+                    **common, "state": "external_redirect",
                     "url": final_url,
                     "status": response.status_code,
                     "issues": [f"External redirect from {current}"],
@@ -2335,9 +2638,16 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
                 })
                 continue
 
+            if final_url in final_seen:
+                page_summaries.append({**common, "url": final_url, "status": response.status_code,
+                                       "state": "redirect_alias", "issues": [], "title": "", "description": ""})
+                continue
+            final_seen.add(final_url)
+
             content_type = response.headers.get("content-type", "").lower()
             if "html" not in content_type and "<html" not in response.text[:500].lower():
                 page_summaries.append({
+                    **common, "state": "non_html",
                     "url": final_url,
                     "status": response.status_code,
                     "issues": [f"Non-HTML response ({content_type or 'unknown content type'})"],
@@ -2346,9 +2656,28 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
                 })
                 continue
 
-            analysis = _analyze_html_document(final_url, response.status_code, dict(response.headers), response.text)
+            page_html = response.text
+            raw_analysis = _analyze_html_document(final_url, response.status_code, response.headers, page_html)
+            render_evidence = None
+            if render_mode != "raw" and 200 <= response.status_code < 300:
+                try:
+                    render_evidence = await render_page(
+                        final_url, raw_response=response, fetch_callback=_fetch_url,
+                        navigation_validator=validate_redirect, resource_validator=validate_resource,
+                        allow_private=ALLOW_PRIVATE_URLS, timeout_seconds=min(30, max(0.1, deadline - time.monotonic())),
+                    )
+                    page_html = render_evidence.pop("rendered_html")
+                    render_evidence.pop("raw_html", None)
+                except Exception as exc:
+                    render_evidence = {"error": str(exc), "status": "partial"}
+            analysis = _analyze_html_document(final_url, response.status_code, response.headers, page_html) if render_mode != "raw" else raw_analysis
+            if render_evidence is not None:
+                render_evidence["raw_signals"] = {key: raw_analysis[key] for key in ("title", "meta_description", "canonicals", "body_word_count")}
+                render_evidence["rendered_signals"] = {key: analysis[key] for key in ("title", "meta_description", "canonicals", "body_word_count")}
             is_noindex = "Page is explicitly marked noindex" in analysis["issues"]
             page_summaries.append({
+                **common, "state": "html", "canonicals": analysis["canonicals"],
+                "findings": _seo_findings_from_analysis(analysis),
                 "url": final_url,
                 "status": response.status_code,
                 "issues": analysis["issues"],
@@ -2360,18 +2689,23 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
                 "word_count": analysis["body_word_count"],
                 "images_missing_alt": len(analysis["images"]["missing_alt"]),
                 "links_missing_href": len(analysis["links"]["missing_href"]),
+                "hreflangs": analysis["alternate_languages"], "structured_data": analysis["structured_data"],
+                "rendering": render_evidence,
             })
 
-            if analysis["title"] and not is_noindex:
-                duplicate_titles[analysis["title"]] += 1
-            if analysis["meta_description"] and not is_noindex:
-                duplicate_descriptions[analysis["meta_description"]] += 1
-
-            for discovered in _iter_internal_links(final_url, response.text):
-                if _url_matches_origin(discovered, origin) and discovered not in visited and discovered not in queue and len(visited) + len(queue) < max_pages * 3:
-                    queue.append(discovered)
+            if response.status_code < 400 and not analysis["nofollow"]:
+                for linked in _iter_internal_links(final_url, page_html):
+                    if linked not in discovered and len(discovered) >= max_pages * 20:
+                        omitted += 1
+                        continue
+                    inbound.setdefault(linked, set()).add(final_url)
+                    if linked not in discovered:
+                        discovered.add(linked)
+                        depths[linked] = depths[current] + 1 if depths[current] is not None else None
+                        queue.append(linked)
         except Exception as exc:
             page_summaries.append({
+                "requested_url": current, "depth": depths[current], "linked_from": [], "state": "fetch_error",
                 "url": current,
                 "status": "ERROR",
                 "issues": [f"Fetch error: {str(exc)}"],
@@ -2379,6 +2713,81 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
                 "description": "",
                 "word_count": 0,
             })
+
+    for page in page_summaries:
+        page["linked_from"] = sorted(inbound.get(page["requested_url"], set()) | inbound.get(page["url"], set()))
+        page["in_sitemap"] = page["requested_url"] in sitemap_urls or page["url"] in sitemap_urls
+        page["sitemap_only_candidate"] = page["in_sitemap"] and not page["linked_from"] and not page.get("is_start_page")
+    unvisited_sitemap_urls = sorted(sitemap_urls - visited - set(blocked))
+    if queue and termination == "frontier_exhausted":
+        termination = "page_limit"
+    if omitted and termination == "frontier_exhausted":
+        termination = "discovery_limit"
+    states = Counter(page["state"] for page in page_summaries)
+    complete = not queue and not blocked and not omitted and not states["fetch_error"] and not robots.get("truncated") and termination == "frontier_exhausted"
+    rendering_incomplete = [p["url"] for p in page_summaries if p.get("rendering") and p["rendering"].get("status") != "complete"]
+    complete = complete and not rendering_incomplete and not unvisited_sitemap_urls and (sitemap_inventory is None or sitemap_inventory["coverage"].get("complete_for_scope", False))
+    return {
+        "start_url": normalized_start, "origin": origin,
+        "settings": {"max_pages": max_pages, "respect_robots": respect_robots, "rendering": render_mode, "user_agent": "mcp-seo-audit",
+                     "include_sitemaps": include_sitemaps, "max_seconds": max_seconds},
+        "robots": robots, "pages": page_summaries, "sitemap_inventory": sitemap_inventory,
+        "coverage": {"attempted": len(visited), "html_pages": states["html"], "discovered": len(discovered),
+                     "remaining": len(queue), "blocked_urls": blocked, "fetch_errors": states["fetch_error"],
+                     "discovery_links_omitted": omitted, "complete_for_discovered_links": complete,
+                     "termination_reason": termination, "rendering_incomplete": rendering_incomplete,
+                     "unvisited_sitemap_urls": unvisited_sitemap_urls},
+    }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_seo_audit_report(start_url: str, max_pages: int = 25, respect_robots: bool = True,
+                             render_mode: str = "raw", include_sitemaps: bool = False,
+                             max_seconds: int = 180) -> Dict[str, Any]:
+    """Return a structured technical SEO action plan with stable rule IDs, affected URLs,
+    evidence, fix guidance, crawl coverage and limits. No Google credentials required.
+    Save the returned JSON in your MCP client to compare later with compare_seo_audits.
+    Optional rendered/compare modes execute JavaScript in a guarded browser; include_sitemaps
+    discovers nested sitemaps and checks unlinked candidates. max_seconds bounds the crawl.
+    Preserves query strings. Respects robots.txt by
+    default; turn this off only for a site you control. max_pages is capped by server configuration.
+    """
+    try:
+        return build_audit_report(await _crawl_site_data(start_url, max_pages, respect_robots, render_mode, include_sitemaps, max_seconds))
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+async def compare_seo_audits(baseline_json: str, current_json: str) -> Dict[str, Any]:
+    """Compare two JSON outputs of get_seo_audit_report with matching crawl settings.
+    Classifies new, resolved, persistent, newly observed and unverified issues without
+    fetching URLs or writing files. Missing/failed pages never prove an issue resolved.
+    """
+    try:
+        if len(baseline_json.encode()) > MAX_FETCH_BYTES or len(current_json.encode()) > MAX_FETCH_BYTES:
+            raise ValueError("Each snapshot must fit within SEO_AUDIT_MAX_FETCH_BYTES.")
+        return compare_audit_reports(json.loads(baseline_json), json.loads(current_json))
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def crawl_site_seo(start_url: str, max_pages: int = 10, respect_robots: bool = True) -> str:
+    """Crawl same-origin raw HTML and summarize issues. Respects robots.txt by default.
+    max_pages bounds fetch attempts, including errors/non-HTML. Use get_seo_audit_report
+    for structured evidence and remediation. Disable robots only for a site you control.
+    """
+    try:
+        crawl = await _crawl_site_data(start_url, max_pages, respect_robots)
+    except Exception as exc:
+        return f"Error crawling site: {exc}"
+    normalized_start, origin = crawl["start_url"], crawl["origin"]
+    max_pages = crawl["settings"]["max_pages"]
+    page_summaries = [page for page in crawl["pages"] if page["state"] != "redirect_alias"]
+    eligible = [page for page in page_summaries if page["state"] == "html" and 200 <= page["status"] < 300 and not page.get("noindex")]
+    duplicate_titles = Counter(page["title"] for page in eligible if page["title"])
+    duplicate_descriptions = Counter(page["description"] for page in eligible if page["description"])
 
     missing_titles = [page["url"] for page in page_summaries if not page.get("noindex") and "Missing <title>" in page.get("issues", [])]
     missing_descriptions = [page["url"] for page in page_summaries if not page.get("noindex") and "Missing meta description" in page.get("issues", [])]
@@ -2424,6 +2833,10 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
         f"Pages with anchors without href: {len(pages_with_uncrawlable_anchors)}",
         f"Duplicate titles: {len(duplicate_title_items)}",
         f"Duplicate meta descriptions: {len(duplicate_description_items)}",
+        f"Crawl stop reason: {crawl['coverage']['termination_reason']}",
+        f"Robots-blocked URLs: {len(crawl['coverage']['blocked_urls'])}",
+        f"Discovered URLs still pending: {crawl['coverage']['remaining']}",
+        "Scope: bounded raw-HTML sample; JavaScript and orphan pages are not covered.",
     ]
     lines.extend(_summarize_priority_findings(crawl_findings))
 
@@ -2469,7 +2882,7 @@ async def crawl_site_seo(start_url: str, max_pages: int = 10) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def audit_live_site(url: str, crawl_pages: int = 5, include_lighthouse: bool = False) -> str:
     """
     Run a live SEO audit without requiring Search Console access.
@@ -2519,11 +2932,11 @@ async def audit_live_site(url: str, crawl_pages: int = 5, include_lighthouse: bo
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def find_striking_distance_keywords(site_url: str, days: int = 28, min_impressions: int = 10, row_limit: int = 50) -> str:
     """
-    Find "striking distance" keywords — queries ranking at positions 5-20 with decent impressions.
-    These are quick-win optimization targets that could reach page 1 with small improvements.
+    Find "striking distance" keywords â€” queries ranking at positions 5-20 with decent impressions.
+    These are review candidates; positions alone do not establish the effort needed to improve rankings.
 
     Args:
         site_url: Exact GSC property URL
@@ -2532,11 +2945,12 @@ async def find_striking_distance_keywords(site_url: str, days: int = 28, min_imp
         row_limit: Max results (default: 50)
     """
     try:
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _gsc_date_window(days)
+        if min_impressions < 1 or not 1 <= row_limit <= 5000:
+            return "min_impressions must be positive and row_limit must be between 1 and 5000."
+        service = await google_service(get_gsc_service)
 
-        response = service.searchanalytics().query(
+        response = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={
                 "startDate": start_date.strftime("%Y-%m-%d"),
@@ -2545,7 +2959,7 @@ async def find_striking_distance_keywords(site_url: str, days: int = 28, min_imp
                 "rowLimit": 5000,
                 "dataState": DATA_STATE,
             },
-        ).execute()
+        ))
 
         if not response.get("rows"):
             return f"No data found for {site_url}."
@@ -2563,16 +2977,16 @@ async def find_striking_distance_keywords(site_url: str, days: int = 28, min_imp
                     "impressions": imp,
                     "ctr": row.get("ctr", 0),
                     "position": pos,
-                    "potential": imp * 0.3 - row.get("clicks", 0),  # Estimated additional clicks if reaching top 3
+                    "potential": max(0, imp * 0.3 - row.get("clicks", 0)),
                 })
 
         candidates.sort(key=lambda x: x["potential"], reverse=True)
 
         lines = [
             f"Striking Distance Keywords for {site_url} (last {days} days):",
-            f"Found {len(candidates)} keywords at positions 5-20 with {min_impressions}+ impressions",
+            f"Found {len(candidates)} query-page candidates in returned rows at positions 5-20 with {min_impressions}+ impressions",
             "-" * 100,
-            "Query | Page | Pos | Impressions | Clicks | CTR | Est. Potential Clicks",
+            "Query | Page | Pos | Impressions | Clicks | CTR | Additional clicks at assumed 30% CTR",
             "-" * 100,
         ]
 
@@ -2587,8 +3001,9 @@ async def find_striking_distance_keywords(site_url: str, days: int = 28, min_imp
         if candidates:
             lines.append(f"\nTop opportunity: '{candidates[0]['query']}' at position {candidates[0]['position']:.1f}")
             lines.append(f"Currently getting {candidates[0]['clicks']} clicks from {candidates[0]['impressions']} impressions.")
-            lines.append("Moving to top 3 could capture ~30% CTR.")
+            lines.append("The 30% CTR scenario is an illustrative assumption, not a forecast or guaranteed effect of ranking in the top 3.")
 
+        lines.extend(_gsc_coverage_notes(response, 5000))
         return "\n".join(lines)
     except Exception as e:
         if "404" in str(e):
@@ -2596,11 +3011,11 @@ async def find_striking_distance_keywords(site_url: str, days: int = 28, min_imp
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def detect_cannibalization(site_url: str, days: int = 28, min_impressions: int = 5) -> str:
     """
-    Detect keyword cannibalization — queries where multiple pages compete for the same keyword.
-    This dilutes ranking power and confuses Google about which page to show.
+    Identify queries appearing for multiple pages as potential cannibalization candidates.
+    Multiple pages can serve different intents; overlap alone does not prove harmful competition.
 
     Args:
         site_url: Exact GSC property URL
@@ -2608,11 +3023,12 @@ async def detect_cannibalization(site_url: str, days: int = 28, min_impressions:
         min_impressions: Minimum impressions per query-page pair (default: 5)
     """
     try:
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _gsc_date_window(days)
+        if min_impressions < 1:
+            return "min_impressions must be positive."
+        service = await google_service(get_gsc_service)
 
-        response = service.searchanalytics().query(
+        response = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={
                 "startDate": start_date.strftime("%Y-%m-%d"),
@@ -2621,7 +3037,7 @@ async def detect_cannibalization(site_url: str, days: int = 28, min_impressions:
                 "rowLimit": 10000,
                 "dataState": DATA_STATE,
             },
-        ).execute()
+        ))
 
         if not response.get("rows"):
             return f"No data found for {site_url}."
@@ -2655,7 +3071,8 @@ async def detect_cannibalization(site_url: str, days: int = 28, min_impressions:
 
         lines = [
             f"Keyword Cannibalization Report for {site_url} (last {days} days):",
-            f"Found {len(cannibalized)} queries with multiple competing pages",
+            f"Found {len(cannibalized)} queries with multiple pages in returned rows",
+            "These are overlap candidates, not confirmed harmful cannibalization. Review intent, canonicalization, and trends before consolidating pages.",
             "-" * 100,
         ]
 
@@ -2672,8 +3089,9 @@ async def detect_cannibalization(site_url: str, days: int = 28, min_impressions:
                 )
 
         if not cannibalized:
-            lines.append("No keyword cannibalization detected. Each query maps to a single page.")
+            lines.append("No keyword cannibalization candidates found within the returned sample and impression threshold.")
 
+        lines.extend(_gsc_coverage_notes(response, 10000))
         return "\n".join(lines)
     except Exception as e:
         if "404" in str(e):
@@ -2681,11 +3099,11 @@ async def detect_cannibalization(site_url: str, days: int = 28, min_impressions:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) -> str:
     """
     Split search performance into branded vs non-branded queries.
-    Shows true organic SEO growth by separating brand searches.
+    Separates query-visible traffic; one period alone does not establish growth.
 
     Args:
         site_url: Exact GSC property URL
@@ -2697,13 +3115,12 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
         if not brand_pattern:
             return "Brand name must not be empty."
 
-        service = get_gsc_service()
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _gsc_date_window(days)
+        service = await google_service(get_gsc_service)
         date_range = {"startDate": start_date.strftime("%Y-%m-%d"), "endDate": end_date.strftime("%Y-%m-%d")}
 
         # Get branded queries
-        branded = service.searchanalytics().query(
+        branded = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={
                 **date_range, "dimensions": ["query"], "rowLimit": 25000, "dataState": DATA_STATE,
@@ -2711,10 +3128,10 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
                     {"dimension": "query", "operator": "includingRegex", "expression": f"(?i){brand_pattern}"}
                 ]}],
             },
-        ).execute()
+        ))
 
         # Get non-branded queries
-        non_branded = service.searchanalytics().query(
+        non_branded = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={
                 **date_range, "dimensions": ["query"], "rowLimit": 25000, "dataState": DATA_STATE,
@@ -2722,13 +3139,13 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
                     {"dimension": "query", "operator": "excludingRegex", "expression": f"(?i){brand_pattern}"}
                 ]}],
             },
-        ).execute()
+        ))
 
         # Also get totals
-        total = service.searchanalytics().query(
+        total = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={**date_range, "dimensions": [], "rowLimit": 1, "dataState": DATA_STATE},
-        ).execute()
+        ))
 
         def sum_metrics(rows):
             clicks = sum(r.get("clicks", 0) for r in rows)
@@ -2762,7 +3179,8 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
             "-" * 60,
             f"Non-branded share of query-visible data: {(nb_clicks / visible_clicks * 100) if visible_clicks else 0:.0f}% of clicks, {(nb_imp / visible_imp * 100) if visible_imp else 0:.0f}% of impressions",
             f"Query coverage vs property total: {(visible_clicks / t_clicks * 100) if t_clicks else 0:.0f}% of clicks, {(visible_imp / t_imp * 100) if t_imp else 0:.0f}% of impressions",
-            "Note: Search Console omits anonymized queries from query-dimension rows, so query-visible totals can be lower than property totals.",
+            "Note: Search Console omits anonymized queries and limits returned rows; these sampled sums can be lower than property totals.",
+            "Brand classification matches the supplied literal text; brand variants and ambiguous names need separate review.",
         ]
 
         if non_branded_rows:
@@ -2772,6 +3190,9 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
                 q = row["keys"][0][:50]
                 lines.append(f"  {q} | clicks: {row.get('clicks', 0)} | imp: {row.get('impressions', 0)} | pos: {row.get('position', 0):.1f}")
 
+        lines.extend(_gsc_coverage_notes(branded, 25000))
+        if len(non_branded_rows) >= 25000:
+            lines.append("Non-branded row limit reached; query-visible totals are a bounded sample.")
         return "\n".join(lines)
     except Exception as e:
         if "404" in str(e):
@@ -2779,26 +3200,30 @@ async def split_branded_queries(site_url: str, brand_name: str, days: int = 28) 
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 30) -> str:
     """
-    Run a comprehensive site audit: checks sitemap health, inspects URLs for indexing issues,
-    identifies coverage problems, and reports findings.
+    Check sitemap submission health, performance, and a sample of top search pages for indexing issues.
+    This sample cannot establish indexing coverage across the entire property.
 
     Args:
         site_url: Exact GSC property URL (e.g. "sc-domain:example.com")
-        sitemap_url: Optional sitemap URL. If not provided, auto-detects from GSC.
-        max_inspect: Max URLs to inspect (default: 30, costs 1 API call each)
+        sitemap_url: Optional submitted sitemap to include in the GSC health report (not crawled here).
+        max_inspect: Max URLs to inspect (0-100, default: 30, costs 1 API call each)
     """
     try:
-        service = get_gsc_service()
+        if not 0 <= max_inspect <= 100:
+            return "max_inspect must be between 0 and 100."
+        service = await google_service(get_gsc_service)
         lines = [f"Site Audit Report for {site_url}", "=" * 80, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
 
         # 1. Sitemap health
         lines.append("1. SITEMAP HEALTH")
         lines.append("-" * 40)
-        sitemaps = service.sitemaps().list(siteUrl=site_url).execute()
+        sitemaps = await execute_google(service.sitemaps().list(siteUrl=site_url))
         sm_list = sitemaps.get("sitemap", [])
+        if sitemap_url:
+            sm_list = [item for item in sm_list if item.get("path") == sitemap_url]
 
         if not sm_list:
             lines.append("WARNING: No sitemaps found!")
@@ -2819,14 +3244,13 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
         # 2. Performance summary
         lines.append(f"\n2. PERFORMANCE SUMMARY (last 28 days)")
         lines.append("-" * 40)
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=28)
+        start_date, end_date = _gsc_date_window(28)
         date_range = {"startDate": start_date.strftime("%Y-%m-%d"), "endDate": end_date.strftime("%Y-%m-%d")}
 
-        total = service.searchanalytics().query(
+        total = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
             body={**date_range, "dimensions": [], "rowLimit": 1, "dataState": DATA_STATE},
-        ).execute()
+        ))
 
         if total.get("rows"):
             r = total["rows"][0]
@@ -2838,10 +3262,10 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
         # 3. Top pages
         lines.append(f"\n3. TOP PAGES BY CLICKS")
         lines.append("-" * 40)
-        pages = service.searchanalytics().query(
+        pages = await execute_google(service.searchanalytics().query(
             siteUrl=site_url,
-            body={**date_range, "dimensions": ["page"], "rowLimit": 20, "dataState": DATA_STATE},
-        ).execute()
+            body={**date_range, "dimensions": ["page"], "rowLimit": max(20, max_inspect), "dataState": DATA_STATE},
+        ))
 
         top_urls_to_inspect = []
         for row in pages.get("rows", []):
@@ -2857,19 +3281,22 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
         urls_to_inspect = top_urls_to_inspect[:max_inspect]
         categories = {"indexed": 0, "crawled_not_indexed": 0, "not_found": 0, "other": 0}
         issues = []
+        completed_inspections = 0
+        lines.append("  Sample source: top pages returned by Search Console; URLs without search visibility may be absent.")
 
         for url in urls_to_inspect:
             try:
-                result = service.urlInspection().index().inspect(
+                result = await execute_google(service.urlInspection().index().inspect(
                     body={"inspectionUrl": url, "siteUrl": site_url}
-                ).execute()
+                ))
                 idx = result.get("inspectionResult", {}).get("indexStatusResult", {})
+                completed_inspections += 1
                 verdict = idx.get("verdict", "UNKNOWN")
                 coverage = idx.get("coverageState", "")
 
                 if verdict == "PASS":
                     categories["indexed"] += 1
-                elif "not indexed" in coverage.lower():
+                elif "crawled" in coverage.lower() and "not indexed" in coverage.lower():
                     categories["crawled_not_indexed"] += 1
                     issues.append(f"CRAWLED NOT INDEXED: {url}")
                 elif "not found" in coverage.lower():
@@ -2893,15 +3320,19 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
         lines.append(f"  Crawled not indexed: {categories['crawled_not_indexed']}")
         lines.append(f"  Not found: {categories['not_found']}")
         lines.append(f"  Other: {categories['other']}")
+        lines.append(f"  Completed inspections: {completed_inspections} / {len(urls_to_inspect)} attempted")
 
         if issues:
             lines.append(f"\n5. ISSUES FOUND ({len(issues)})")
             lines.append("-" * 40)
             for issue in issues:
                 lines.append(f"  {issue}")
+        elif completed_inspections:
+            lines.append("\n5. No indexing issues found in this inspected sample. This does not establish full-site coverage.")
         else:
-            lines.append("\n5. No issues found! All inspected pages are properly indexed.")
+            lines.append("\n5. No URLs were inspected; indexing status is unknown.")
 
+        lines.extend(_gsc_coverage_notes(pages, max(20, max_inspect)))
         lines.append("\n" + "=" * 80)
         lines.append("End of audit report.")
 
@@ -2912,40 +3343,183 @@ async def site_audit(site_url: str, sitemap_url: str = None, max_inspect: int = 
         return f"Error running audit: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Auth Management
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@mcp.tool()
+def _save_oauth_token(creds: Any) -> None:
+    """Replace the token only after a complete, durable write in the same directory."""
+    token_dir = os.path.dirname(os.path.abspath(TOKEN_FILE))
+    os.makedirs(token_dir, mode=0o700, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".oauth-token-", suffix=".tmp", dir=token_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as token:
+            token.write(creds.to_json())
+            token.flush()
+            os.fsync(token.fileno())
+        os.replace(temporary_path, TOKEN_FILE)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
 async def reauthenticate() -> str:
     """
-    Perform a logout and new login sequence.
-    Deletes the current OAuth token and triggers a new browser auth flow.
+    Authenticate a new account, then atomically replace the saved OAuth token.
+    Existing credentials and service caches are preserved if login or saving fails.
     """
     try:
         global _gsc_service_cache, _indexing_service_cache
-        _gsc_service_cache = None
-        _indexing_service_cache = None
-
-        if os.path.exists(TOKEN_FILE):
-            os.remove(TOKEN_FILE)
-
         if not os.path.exists(OAUTH_CLIENT_SECRETS_FILE):
             return "Error: client_secrets.json not found. Cannot start auth flow."
 
         flow = InstalledAppFlow.from_client_secrets_file(OAUTH_CLIENT_SECRETS_FILE, ALL_SCOPES)
-        creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "w") as token:
-            token.write(creds.to_json())
+        creds = await google_service(lambda: flow.run_local_server(port=0, timeout_seconds=180, authorization_prompt_message=""))
+        _save_oauth_token(creds)
+        _gsc_service_cache = None
+        _indexing_service_cache = None
 
         return "Successfully authenticated with a new Google account."
     except Exception as e:
         return f"Error during reauthentication: {str(e)}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_search_analytics_snapshot(
+    site_url: str, days: int = 28, dimensions: str = "page", max_rows: int = 25000,
+    max_requests: int = 10, search_type: str = "web",
+) -> Dict[str, Any]:
+    """Fetch a bounded, paginated Search Console snapshot with explicit coverage.
+    Returns at most 100,000 rows / 10 API pages within 180 seconds. Google may still
+    omit anonymized/long-tail rows; completion is only for the returned API window.
+    Partial results survive provider errors. Includes data-state/freshness metadata.
+    """
+    rows, seen = [], set()
+    calls, duplicate_rows = 0, 0
+    metadata = {}
+    error = None
+    reason = "row_limit"
+    try:
+        if not 1 <= max_rows <= 100000 or not 1 <= max_requests <= 10:
+            raise ValueError("max_rows must be 1-100000 and max_requests 1-10.")
+        start, end = _gsc_date_window(days)
+        dims = _gsc_dimensions(dimensions)
+        search = _gsc_search_type(search_type)
+    except (ValueError, TypeError) as exc:
+        return {"error": str(exc)}
+    try:
+        offset = 0
+        async with asyncio.timeout(180):
+            service = await google_service(get_gsc_service)
+            while len(rows) < max_rows and calls < max_requests:
+                page_size = min(25000, max_rows - len(rows))
+                body = {"startDate": start.isoformat(), "endDate": end.isoformat(), "dimensions": dims,
+                        "type": search, "dataState": DATA_STATE, "rowLimit": page_size, "startRow": offset}
+                calls += 1
+                result = await execute_google(service.searchanalytics().query(siteUrl=site_url, body=body))
+                batch = result.get("rows", [])
+                metadata.update(result.get("metadata", {}))
+                new_count = 0
+                for row in batch:
+                    key = tuple(row.get("keys", []))
+                    if key in seen:
+                        duplicate_rows += 1
+                    else:
+                        seen.add(key)
+                        rows.append(row)
+                        new_count += 1
+                offset += len(batch)
+                if len(batch) < page_size:
+                    reason = "api_window_exhausted"
+                    break
+                if not new_count:
+                    reason = "repeated_page"
+                    break
+            else:
+                reason = "row_limit" if len(rows) >= max_rows else "request_limit"
+    except TimeoutError:
+        reason, error = "time_budget", "180-second snapshot budget exceeded."
+    except Exception as exc:
+        reason, error = "api_error", _redact_api_keys(str(exc))
+    return {
+        "schema_version": "1.0", "site_url": site_url, "rows": rows,
+        "start_date": start.isoformat(), "end_date": end.isoformat(), "dimensions": dims,
+        "data_state": DATA_STATE, "metadata": metadata,
+        "coverage": {"rows": len(rows), "requests": calls, "duplicate_rows": duplicate_rows,
+                     "stop_reason": reason, "complete_for_api_window": reason == "api_window_exhausted"},
+        "error": error,
+        "limitations": ["Google returns top rows and may omit anonymized or long-tail data.",
+                        "Rows can change between pages when provisional data is requested; duplicates are removed.",
+                        "Requests counts API pages; retry attempts can consume additional quota."],
+    }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def prioritize_audit_issues(report_json: str, site_url: str, days: int = 28) -> Dict[str, Any]:
+    """Add observed Search Console traffic to an audit action plan. Sort by severity,
+    then affected-page clicks/impressions. Does not estimate revenue or ranking gains.
+    Unmatched URLs are unknown, not zero. No page traffic is double-counted within a rule.
+    """
+    try:
+        if len(report_json.encode()) > MAX_FETCH_BYTES:
+            raise ValueError("Report exceeds SEO_AUDIT_MAX_FETCH_BYTES.")
+        report = json.loads(report_json)
+        if not isinstance(report, dict) or report.get("schema_version") != "1.0" or not isinstance(report.get("issues"), list):
+            raise ValueError("Expected a schema_version 1.0 audit report.")
+        for issue in report["issues"]:
+            if (not isinstance(issue, dict) or not isinstance(issue.get("affected_urls"), list)
+                    or any(not isinstance(url, str) for url in issue["affected_urls"])):
+                raise ValueError("Each issue must include affected_urls as a list of URL strings.")
+        snapshot = await get_search_analytics_snapshot(site_url, days=days, dimensions="page")
+        if "rows" not in snapshot:
+            return snapshot
+        by_url = {row["keys"][0]: row for row in snapshot["rows"] if row.get("keys")}
+        priorities = []
+        for issue in report["issues"]:
+            urls = sorted(set(issue["affected_urls"]))
+            matched = [by_url[url] for url in urls if url in by_url]
+            priorities.append({**issue, "traffic": {
+                "observed_clicks": sum(row.get("clicks", 0) for row in matched),
+                "observed_impressions": sum(row.get("impressions", 0) for row in matched),
+                "matched_pages": len(matched), "unknown_pages": len(urls) - len(matched),
+            }})
+        priorities.sort(key=lambda item: (SEO_SEVERITY_ORDER.get(item.get("severity"), 4),
+                                         -item["traffic"]["observed_clicks"], -item["traffic"]["observed_impressions"]))
+        return {"schema_version": "1.0", "origin": report.get("origin"), "issues": priorities,
+                "analytics_coverage": snapshot["coverage"], "analytics_error": snapshot["error"],
+                "limitations": snapshot["limitations"] + ["Traffic is an observed prioritization signal, not predicted business impact.",
+                    "URL matching is exact; redirects, aliases, or unmatched URLs need manual review."]}
+    except (ValueError, TypeError, KeyError) as exc:
+        return {"error": str(exc)}
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Entry point
-# ──────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+async def get_server_status() -> Dict[str, Any]:
+    """Inspect local setup without credential values, network calls, or starting jobs.
+    Credential presence does not prove current Google permissions or quota.
+    """
+    import importlib.util
+    return {
+        "version": "2.1.0", "transport": "stdio", "tool_count": len(mcp._tool_manager._tools),
+        "write_tools_enabled": ENABLE_WRITE_TOOLS, "private_urls_allowed": ALLOW_PRIVATE_URLS,
+        "browser_package_installed": importlib.util.find_spec("playwright") is not None,
+        "oauth_client_present": os.path.isfile(OAUTH_CLIENT_SECRETS_FILE),
+        "oauth_token_present": os.path.isfile(TOKEN_FILE) or (not os.environ.get("GSC_TOKEN_FILE") and os.path.isfile(LEGACY_TOKEN_FILE)),
+        "service_account_file_present": any(path and os.path.isfile(path) for path in POSSIBLE_CREDENTIAL_PATHS),
+        "pagespeed_key_configured": bool(PAGESPEED_API_KEY), "crux_key_configured": bool(CRUX_API_KEY),
+        "max_crawl_pages": MAX_CRAWL_PAGES, "max_fetch_bytes": MAX_FETCH_BYTES,
+        "monitoring": "Requires explicit schedules and a separate mcp-seo-monitor worker.",
+        "live_provider_access": "not_tested", "browser_execution": "verified only by a successful rendered audit",
+    }
+
+
+register_monitoring_tools(mcp, get_seo_audit_report)
+
 
 def main():
     """Entry point for the MCP server (used by pyproject.toml [project.scripts])."""

@@ -1,6 +1,6 @@
 """
 Comprehensive QA test suite for GSC MCP Server.
-All Google API calls are mocked — no credentials needed.
+All Google API calls are mocked â€” no credentials needed.
 Run: python -m pytest test_gsc_server.py -v
 """
 
@@ -24,7 +24,7 @@ os.environ.setdefault("SEO_AUDIT_ALLOW_NPX_LIGHTHOUSE", "true")
 import gsc_server as gs
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def run(coro):
     """Run an async tool function synchronously."""
@@ -64,7 +64,7 @@ def mock_search_rows_with_pages(pairs, clicks=10, impressions=100, ctr=0.1, posi
     ]
 
 
-# ─── Configuration Tests ───────────────────────────────────────────────────
+# â”€â”€â”€ Configuration Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestConfiguration:
     def test_data_state_defaults_to_all(self):
@@ -97,7 +97,7 @@ class TestConfiguration:
             gs._validate_fetchable_public_url("https://internal.example.com")
 
 
-# ─── Auth Helper Tests ─────────────────────────────────────────────────────
+# â”€â”€â”€ Auth Helper Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestAuth:
     @patch("gsc_server.SKIP_OAUTH", False)
@@ -150,7 +150,7 @@ class TestAuth:
     @patch("gsc_server.build")
     @patch("gsc_server.Credentials.from_authorized_user_file")
     @patch("gsc_server.os.path.exists")
-    @patch("builtins.open", new_callable=mock_open)
+    @patch("gsc_server._save_oauth_token")
     def test_get_indexing_service_oauth_uses_authorized_user_file_and_saves_refresh(
         self, mock_file, mock_exists, mock_from_file, mock_build
     ):
@@ -176,7 +176,7 @@ class TestAuth:
         assert result == mock_service
         mock_from_file.assert_called_once_with(gs.TOKEN_FILE, expected_scopes)
         mock_creds.refresh.assert_called_once()
-        mock_file().write.assert_called_once_with('{"token": "fresh"}')
+        mock_file.assert_called_once_with(mock_creds)
         gs._indexing_service_cache = None
 
     def test_site_not_found_error_domain_property(self):
@@ -189,7 +189,7 @@ class TestAuth:
         assert "sc-domain:example.com" in msg
 
 
-# ─── Property Management Tests ─────────────────────────────────────────────
+# â”€â”€â”€ Property Management Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestPropertyManagement:
     @patch("gsc_server.get_gsc_service")
@@ -245,7 +245,7 @@ class TestPropertyManagement:
         assert "has been removed" in result
 
 
-# ─── Search Analytics Tests ────────────────────────────────────────────────
+# â”€â”€â”€ Search Analytics Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestSearchAnalytics:
     @patch("gsc_server.get_gsc_service")
@@ -284,10 +284,7 @@ class TestSearchAnalytics:
         mock_get.return_value = svc
         # row_limit > 500 should be clamped
         run(gs.get_search_analytics("sc-domain:example.com", row_limit=9999))
-        call_body = svc.searchanalytics().query.call_args
-        # The rowLimit in the body should be 500
-        # Note: mock chaining makes this tricky; just verify it doesn't error
-        assert True
+        assert svc.searchanalytics().query.call_args.kwargs["body"]["rowLimit"] == 500
 
     @patch("gsc_server.get_gsc_service")
     def test_get_advanced_search_analytics_with_filters(self, mock_get):
@@ -313,25 +310,24 @@ class TestSearchAnalytics:
 
     @patch("gsc_server.get_gsc_service")
     def test_get_advanced_sort_direction_uppercase(self, mock_get):
-        """Verify sort_direction is properly mapped to API constants."""
+        """Sort locally because Search Console has no orderBy request parameter."""
         svc = make_mock_service()
         svc.searchanalytics().query().execute.return_value = {"rows": mock_search_rows(["test"])}
         mock_get.return_value = svc
-        # Should not error — the direction gets mapped to DESCENDING
         result = run(gs.get_advanced_search_analytics("sc-domain:example.com", sort_direction="descending"))
-        assert "Error" not in result or "test" in result
+        assert "Error" not in result
+        assert "orderBy" not in svc.searchanalytics().query.call_args.kwargs["body"]
 
     @pytest.mark.parametrize(
-        ("raw_direction", "expected_direction"),
+        "raw_direction",
         [
-            ("asc", "ASCENDING"),
-            ("desc", "DESCENDING"),
-            ("sideways", "DESCENDING"),
+            "asc",
+            "desc",
         ],
     )
     @patch("gsc_server.get_gsc_service")
-    def test_get_advanced_sort_direction_aliases_and_invalid_default(
-        self, mock_get, raw_direction, expected_direction
+    def test_get_advanced_sort_direction_aliases(
+        self, mock_get, raw_direction
     ):
         svc = make_mock_service()
         svc.searchanalytics().query().execute.return_value = {"rows": mock_search_rows(["test"])}
@@ -340,7 +336,7 @@ class TestSearchAnalytics:
         run(gs.get_advanced_search_analytics("sc-domain:example.com", sort_direction=raw_direction))
 
         request_body = svc.searchanalytics().query.call_args.kwargs["body"]
-        assert request_body["orderBy"][0]["direction"] == expected_direction
+        assert "orderBy" not in request_body
 
 
 class TestPerformanceOverview:
@@ -421,7 +417,7 @@ class TestSearchByPageQuery:
         assert "No search data" in result
 
 
-# ─── URL Inspection Tests ──────────────────────────────────────────────────
+# â”€â”€â”€ URL Inspection Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestURLInspection:
     @patch("gsc_server.get_gsc_service")
@@ -494,7 +490,7 @@ class TestURLInspection:
         assert "50" in result
 
 
-# ─── Sitemap Tests ─────────────────────────────────────────────────────────
+# â”€â”€â”€ Sitemap Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestSitemaps:
     @patch("gsc_server.get_gsc_service")
@@ -542,7 +538,7 @@ class TestSitemaps:
         assert "Deleted" in result
 
 
-# ─── Indexing API Tests ────────────────────────────────────────────────────
+# â”€â”€â”€ Indexing API Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestPlainSitemap:
     def test_parse_plain_text_sitemap_as_urlset(self):
@@ -676,7 +672,7 @@ class TestIndexingAPI:
         assert "No indexing notifications" in result
 
 
-# ─── Core Web Vitals Tests ─────────────────────────────────────────────────
+# â”€â”€â”€ Core Web Vitals Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestCoreWebVitals:
     def test_crux_no_api_key(self):
@@ -754,7 +750,7 @@ class TestCoreWebVitals:
         assert "NEEDS WORK" in result
 
 
-# ─── SEO Analysis Tests ───────────────────────────────────────────────────
+# â”€â”€â”€ SEO Analysis Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestStrikingDistance:
     @patch("gsc_server.get_gsc_service")
@@ -860,10 +856,10 @@ class TestBrandedQueries:
         mock_get.return_value = svc
         result = run(gs.split_branded_queries("sc-domain:example.com", "testbrand"))
         assert "Branded" in result
-        # Should not crash — division by zero is guarded
+        # Should not crash â€” division by zero is guarded
 
 
-# ─── Site Audit Tests ──────────────────────────────────────────────────────
+# â”€â”€â”€ Site Audit Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestSiteAudit:
     @patch("gsc_server.get_gsc_service")
@@ -927,14 +923,15 @@ class TestSiteAudit:
         assert "CANONICAL MISMATCH" in result
 
 
-# ─── Auth Management Tests ─────────────────────────────────────────────────
+# â”€â”€â”€ Auth Management Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestReauthenticate:
+    @patch("gsc_server._save_oauth_token")
     @patch("gsc_server.InstalledAppFlow")
     @patch("gsc_server.os.path.exists")
     @patch("gsc_server.os.remove")
     @patch("builtins.open", mock_open())
-    def test_reauthenticate_clears_cache(self, mock_remove, mock_exists, mock_flow):
+    def test_reauthenticate_clears_cache(self, mock_remove, mock_exists, mock_flow, mock_save):
         gs._gsc_service_cache = MagicMock()
         gs._indexing_service_cache = MagicMock()
 
@@ -952,7 +949,7 @@ class TestReauthenticate:
         )
 
 
-# ─── Helper Function Tests ─────────────────────────────────────────────────
+# â”€â”€â”€ Helper Function Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestHelpers:
     def test_format_crux_metric_empty(self):
@@ -977,7 +974,7 @@ class TestHelpers:
         assert "90%" in result
 
 
-# ─── Edge Case / Regression Tests ─────────────────────────────────────────
+# â”€â”€â”€ Edge Case / Regression Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestPublicWebAuditTools:
     def test_buffer_decoded_response_removes_stale_encoding_headers(self):
@@ -1048,6 +1045,7 @@ class TestPublicWebAuditTools:
 
     @patch("gsc_server.run_lighthouse_audit", new_callable=AsyncMock)
     @patch("gsc_server.httpx.AsyncClient")
+    @patch("gsc_server.ENABLE_LOCAL_LIGHTHOUSE", True)
     def test_get_pagespeed_insights_falls_back_to_lighthouse(self, mock_client_cls, mock_lighthouse):
         request = httpx.Request("GET", "https://www.googleapis.com/pagespeedonline/v5/runPagespeed")
         response = httpx.Response(429, text='{"error":"quota"}', request=request)
@@ -1062,7 +1060,8 @@ class TestPublicWebAuditTools:
         assert "Local Lighthouse fallback:" in result
         assert "Local Lighthouse audit for https://example.com (mobile)" in result
 
-    @patch("gsc_server.subprocess.run")
+    @patch("gsc_server.ENABLE_LOCAL_LIGHTHOUSE", True)
+    @patch("gsc_server._run_lighthouse_process", new_callable=AsyncMock)
     @patch("gsc_server.shutil.which")
     def test_run_lighthouse_audit_success(self, mock_which, mock_run):
         mock_which.return_value = "npx"
@@ -1088,6 +1087,7 @@ class TestPublicWebAuditTools:
         assert "performance: 88" in result
 
     @patch("gsc_server.shutil.which")
+    @patch("gsc_server.ENABLE_LOCAL_LIGHTHOUSE", True)
     def test_run_lighthouse_audit_missing_npx(self, mock_which):
         mock_which.return_value = None
         result = run(gs.run_lighthouse_audit("https://example.com"))
@@ -1228,7 +1228,7 @@ class TestPublicWebAuditTools:
             request=httpx.Request("GET", "https://example.com/about"),
         )
         mock_fetch.side_effect = [home, about]
-        result = run(gs.crawl_site_seo("https://example.com", max_pages=2))
+        result = run(gs.crawl_site_seo("https://example.com", max_pages=2, respect_robots=False))
         assert "Pages crawled: 2 / 2" in result
         assert "Pages missing meta description: 1" in result
         assert "Priority findings:" in result
@@ -1294,7 +1294,7 @@ class TestCrawlExternalRedirect:
         )
         mock_fetch.side_effect = [home, external]
 
-        result = run(gs.crawl_site_seo("https://example.com", max_pages=2))
+        result = run(gs.crawl_site_seo("https://example.com", max_pages=2, respect_robots=False))
 
         assert "External redirect from https://example.com/out" in result
         assert "https://third-party.example/landing" in result
@@ -1323,7 +1323,7 @@ class TestCrawlNoindexPages:
         )
         mock_fetch.side_effect = [home, signin]
 
-        result = run(gs.crawl_site_seo("https://example.com", max_pages=2))
+        result = run(gs.crawl_site_seo("https://example.com", max_pages=2, respect_robots=False))
 
         assert "Pages marked noindex: 1" in result
         assert "Pages with thin content: 1" in result
@@ -1361,9 +1361,9 @@ class TestEdgeCases:
         result = run(gs.batch_inspect_urls("sc-domain:example.com", "https://example.com/test"))
         assert "Errors: 1" in result
 
-    def test_module_has_30_tools(self):
+    def test_module_has_43_tools(self):
         tools = list(gs.mcp._tool_manager._tools.keys())
-        assert len(tools) == 30
+        assert len(tools) == 43
 
     def test_all_expected_tools_registered(self):
         tools = set(gs.mcp._tool_manager._tools.keys())
@@ -1378,7 +1378,10 @@ class TestEdgeCases:
             "get_pagespeed_insights", "run_lighthouse_audit", "inspect_robots_txt",
             "analyze_sitemap", "analyze_page_seo", "crawl_site_seo", "audit_live_site",
             "find_striking_distance_keywords", "detect_cannibalization", "split_branded_queries",
-            "site_audit", "reauthenticate",
+            "site_audit", "reauthenticate", "get_seo_audit_report", "compare_seo_audits",
+            "get_server_status", "get_search_analytics_snapshot", "prioritize_audit_issues",
+            "create_audit_project", "list_audit_projects", "set_audit_schedule", "run_project_audit",
+            "list_project_audits", "get_project_audit", "compare_project_audits", "list_audit_events",
         }
         assert tools == expected
 

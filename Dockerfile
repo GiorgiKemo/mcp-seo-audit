@@ -1,14 +1,20 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY pyproject.toml README.md LICENSE gsc_server.py seo_*.py ./
+RUN pip install --no-cache-dir --no-deps . \
+    && useradd --create-home --uid 10001 auditor \
+    && mkdir /data && chown auditor:auditor /data
 
-COPY requirements.txt pyproject.toml gsc_server.py ./
+ENV GSC_SKIP_OAUTH=true \
+    SEO_AUDIT_ENABLE_WRITE_TOOLS=false \
+    SEO_AUDIT_ALLOW_PRIVATE_URLS=false \
+    SEO_AUDIT_ENABLE_LOCAL_LIGHTHOUSE=false \
+    SEO_AUDIT_DATA_DIR=/data \
+    PYTHONUNBUFFERED=1
 
-RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir -e .
-
-ENV GSC_SKIP_OAUTH=true
-ENV SEO_AUDIT_ENABLE_WRITE_TOOLS=false
-ENV SEO_AUDIT_ALLOW_PRIVATE_URLS=false
-ENV LIGHTHOUSE_NO_SANDBOX=true
-
+USER auditor
+VOLUME ["/data"]
 ENTRYPOINT ["mcp-seo-audit"]

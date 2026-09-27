@@ -2,11 +2,12 @@
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "name": "mcp-seo-audit",
   "display_name": "SEO Audit MCP Server",
-  "description": "SEO audit server with 30 tools: Google Search Console analytics, Indexing API, CrUX, PageSpeed Insights, Lighthouse, robots.txt checks, sitemap analysis, page SEO inspection, crawl audits, and live site audits.",
+  "description": "Local SEO auditing with guarded JavaScript rendering, sitemap inventories, Search Console analytics, performance checks, durable history, and opt-in monitoring.",
+  "version": "2.1.0",
   "repository": "https://github.com/GiorgiKemo/mcp-seo-audit",
   "homepage": "https://github.com/GiorgiKemo/mcp-seo-audit",
   "license": "MIT",
   "runtime": "python",
   "maintainers": ["GiorgiKemo"],
-  "tags": ["seo", "google-search-console", "indexing", "core-web-vitals", "pagespeed-insights", "lighthouse", "crawl-audit", "site-audit"]
+  "tags": ["seo", "google-search-console", "indexing", "core-web-vitals", "pagespeed-insights", "lighthouse", "crawl-audit", "site-audit", "monitoring", "javascript-rendering"]
 }

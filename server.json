@@ -2,13 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.giorgikemo/mcp-seo-audit",
   "title": "SEO Audit MCP Server",
-  "description": "Google Search Console, Indexing API, Core Web Vitals, PageSpeed Insights, Lighthouse, sitemap, robots.txt, on-page SEO, crawl, and live site audit tools for MCP clients.",
-  "version": "2.0.2",
+  "description": "SEO audits, JavaScript rendering, Search Console analytics, saved history, and opt-in monitoring.",
+  "version": "2.1.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-seo-audit",
-      "version": "2.0.2",
+      "version": "2.1.0",
       "transport": {
         "type": "stdio"
       }

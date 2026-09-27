@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!requirements.lock
+!pyproject.toml
+!README.md
+!LICENSE
+!gsc_server.py
+!seo_*.py
