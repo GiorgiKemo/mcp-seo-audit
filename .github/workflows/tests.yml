@@ -12,6 +12,8 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/seo-audit-browsers
     strategy:
       fail-fast: false
       matrix:
@@ -19,7 +21,7 @@ jobs:
         python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -30,13 +32,52 @@ jobs:
           python -m pip install --no-deps .
           python -m pip install pytest build pip-audit
           python -m pip check
-      - name: Install browser for integration tests
-        if: matrix.python-version == '3.13'
+      - name: Install browser and Linux dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python -m playwright install --with-deps chromium
+      - name: Install browser on Windows
+        if: matrix.os == 'windows-latest' && matrix.python-version == '3.13'
+        run: python -m playwright install chromium
+      - name: Allow sandbox user namespaces for the installed browser only
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        shell: bash
+        run: |
+          # Chromium's per-executable AppArmor guidance; keep its sandbox enabled.
+          # https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          browser_root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]).resolve(strict=True)
+          executables = sorted({path.resolve(strict=True)
+                                for name in ("chrome", "chrome-headless-shell", "headless_shell")
+                                for path in browser_root.rglob(name) if path.is_file()})
+          names = {path.name for path in executables}
+          if "chrome" not in names or not names.intersection({"chrome-headless-shell", "headless_shell"}):
+              raise RuntimeError("Both installed Chromium executables must be present before granting userns.")
+          profiles = ["abi <abi/4.0>,\ninclude <tunables/global>\n"]
+          for index, executable in enumerate(executables):
+              if browser_root not in executable.parents or not re.fullmatch(r"[A-Za-z0-9_./-]+", str(executable)):
+                  raise RuntimeError("Browser executable must have a literal path within the dedicated install directory.")
+              profiles.append(f'profile seo-audit-playwright-{index} "{executable}" flags=(unconfined) {{\n  userns,\n}}\n')
+              print(f"Allowing sandbox user namespaces for {executable}")
+          Path(os.environ["RUNNER_TEMP"], "seo-audit-playwright.apparmor").write_text("\n".join(profiles), encoding="utf-8")
+          PY
+          sudo install -m 0644 "$RUNNER_TEMP/seo-audit-playwright.apparmor" /etc/apparmor.d/seo-audit-playwright
+          sudo apparmor_parser --replace /etc/apparmor.d/seo-audit-playwright
       - name: Run regression tests with real local HTTP and MCP
         env:
           SEO_AUDIT_TEST_BROWSER: ${{ matrix.python-version == '3.13' && '1' || '0' }}
         run: python -m pytest -q
+      - name: Remove the temporary browser AppArmor profile
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        shell: bash
+        run: |
+          if [ -f /etc/apparmor.d/seo-audit-playwright ]; then
+            sudo apparmor_parser --remove /etc/apparmor.d/seo-audit-playwright
+            sudo rm /etc/apparmor.d/seo-audit-playwright
+          fi
       - name: Audit locked runtime dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python -m pip_audit --require-hashes -r requirements.lock

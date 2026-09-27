@@ -26,6 +26,8 @@ python -m playwright install chromium
 
 Set `SEO_AUDIT_TEST_BROWSER=1` before running pytest to opt into the installed-browser integration checks. Keep browser sandboxing enabled. Use temporary local fixtures for browser checks. The default test configuration isolates Google credentials and blocks uncontrolled network access; never replace those protections with a live key to make a test pass.
 
+On Linux, install OS dependencies with `python -m playwright install --with-deps chromium`. For Ubuntu's `No usable sandbox` error, use [Chromium's per-executable AppArmor setup](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md): the administrator grants `userns` to the exact trusted Chromium/headless-shell paths and reloads that profile. [Our workflow](.github/workflows/tests.yml) generates the paths from its dedicated browser install directory, loads only the temporary profile, and removes it after testing. Keep `chromium_sandbox=True`; do not replace this with `--no-sandbox` or a global user-namespace restriction change. Browser upgrades may require updated paths.
+
 ## Change expectations
 
 - Keep changes focused and preserve stable rule IDs and existing report semantics where possible.

@@ -34,6 +34,12 @@ def _windows_process_job(pid):
             ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t),
         ]
 
+    class ProcessList(ctypes.Structure):
+        _fields_ = [
+            ("assigned", wintypes.DWORD), ("count", wintypes.DWORD),
+            ("ids", ctypes.c_size_t * 4096),
+        ]
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     kernel.CreateJobObjectW.restype = wintypes.HANDLE
@@ -43,6 +49,12 @@ def _windows_process_job(pid):
     kernel.OpenProcess.restype = wintypes.HANDLE
     kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+    kernel.QueryInformationJobObject.restype = wintypes.BOOL
+    kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.TerminateJobObject.restype = wintypes.BOOL
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
     job = kernel.CreateJobObjectW(None, None)
@@ -64,7 +76,46 @@ def _windows_process_job(pid):
     except BaseException:
         kernel.CloseHandle(job)
         raise
-    return lambda: kernel.CloseHandle(job)
+    async def terminate_and_wait():
+        handles = {}
+
+        def capture_members():
+            members = ProcessList()
+            if not kernel.QueryInformationJobObject(job, 3, ctypes.byref(members), ctypes.sizeof(members), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            for member in members.ids[:members.count]:
+                if member in handles:
+                    continue
+                handle = kernel.OpenProcess(0x00100000, False, member)  # SYNCHRONIZE
+                if handle:
+                    handles[member] = handle
+                elif ctypes.get_last_error() not in {87, 1168}:  # Already exited.
+                    raise ctypes.WinError(ctypes.get_last_error())
+            return members.count
+
+        try:
+            capture_members()
+            if not kernel.TerminateJobObject(job, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Job termination and pipe EOF do not mean all process objects are
+            # signaled yet. Keep handles alive and await actual child exit.
+            deadline = asyncio.get_running_loop().time() + 5
+            while True:
+                active = capture_members()
+                waits = [kernel.WaitForSingleObject(handle, 0) for handle in handles.values()]
+                if any(result not in {0, 258} for result in waits):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not active and all(result == 0 for result in waits):
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError("Windows Lighthouse process tree did not stop within the cleanup deadline.")
+                await asyncio.sleep(0.01)
+        finally:
+            kernel.CloseHandle(job)
+            for handle in handles.values():
+                kernel.CloseHandle(handle)
+
+    return terminate_and_wait
 
 
 async def _run_lighthouse_process(command: list[str], *, timeout: float = 180, max_output_bytes: int = 20 * 1024 * 1024):
@@ -107,7 +158,7 @@ async def _run_lighthouse_process(command: list[str], *, timeout: float = 180, m
         if readers:
             await asyncio.gather(*readers, return_exceptions=True)
         if close_job is not None:
-            close_job()
+            await close_job()
         if os.name == "nt":
             if close_job is None and process.returncode is None:
                 # Kill only the tree rooted at the CLI we just created. A bare

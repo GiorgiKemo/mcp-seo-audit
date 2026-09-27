@@ -38,6 +38,29 @@ For a smaller source installation without browser support, `python -m pip instal
 
 Linux may require OS browser dependencies; `python -m playwright install --with-deps chromium` installs them where you administer those packages. Chromium's sandbox remains enabled. Run as a supported non-root user with the required OS facilities rather than disabling sandboxing.
 
+On Ubuntu 23.10+ an AppArmor user-namespace restriction can cause Chromium's `No usable sandbox` error. Ask the machine administrator to follow [Chromium's per-executable AppArmor instructions](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md), allowing `userns` for the exact installed Chromium and headless-shell executable paths. Keep those browser files trusted and refresh the profile after browser updates. The [CI workflow](.github/workflows/tests.yml) demonstrates this scoped setup; it retains Chromium sandboxing and the system-wide restriction.
+
+### Docker
+
+Build and connect the non-root stdio container with a named volume for audit history and configuration:
+
+```sh
+docker build -t mcp-seo-audit:2.1.0 .
+docker run --rm -i -v seo-audit-data:/data mcp-seo-audit:2.1.0
+```
+
+Configure the MCP client to launch the `docker run` command. No HTTP port is exposed. The image supports raw crawling by default; it includes the Python browser package but no Chromium binary or browser OS dependencies. Rendered audits require a separate image setup that installs both and supports the enabled browser sandbox.
+
+Run one batch of explicitly enabled schedules against the same data volume:
+
+```sh
+docker run --rm --entrypoint mcp-seo-monitor -v seo-audit-data:/data mcp-seo-audit:2.1.0 --once
+```
+
+Google credentials are optional for public-site audits. To use Google tools, explicitly mount your own credential file read-only and set the matching credential-path environment variable; never copy credentials into the image. See the authentication settings below.
+
+### MCP client configuration
+
 Add a stdio server in your MCP client's configuration. For example, on Windows:
 
 ```json

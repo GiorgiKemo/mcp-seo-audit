@@ -112,7 +112,7 @@ PAGESPEED_API_KEY = os.environ.get("PAGESPEED_API_KEY", os.environ.get("GOOGLE_A
 LIGHTHOUSE_CHROME_PATH = os.environ.get("LIGHTHOUSE_CHROME_PATH", os.environ.get("CHROME_PATH", ""))
 
 DEFAULT_FETCH_HEADERS = {
-    "User-Agent": "mcp-seo-audit/2.0 (+https://github.com/GiorgiKemo/mcp-seo-audit)",
+    "User-Agent": "mcp-seo-audit/2.1 (+https://github.com/GiorgiKemo/mcp-seo-audit)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
 }
 DEFAULT_FETCH_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=20.0)

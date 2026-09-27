@@ -57,7 +57,7 @@ The comparison also accounts for duplicate peers and canonical targets. For exam
 - Local Windows/Python 3.14 suite: 446 tests passed with actual Chromium enabled. This includes real HTTP, public audit workflow, MCP subprocess, persistence and Windows child-process cleanup tests.
 - The installed hash-pinned runtime passes `pip check`; wheel and source distributions build successfully with all ten runtime modules.
 - GitHub Actions runs Python 3.11, 3.13 and 3.14 on Ubuntu and Windows, including actual Chromium on 3.13, package metadata validation, dependency auditing and a nonroot Docker smoke check. The badge and exact commit workflow are the authoritative remote results.
-- Google integrations use mocked responses for repeatable validation. Credential presence does not prove live account permissions, quota, data coverage or current provider availability. No Google write calls were made.
+- Google integrations use mocked responses for repeatable validation. Additional live read-only checks succeeded for existing OAuth credentials: property listing and a one-row Search Analytics snapshot with the requested row-limit metadata. This verifies those operations for that configured account at test time, not every Google integration, property, quota or future provider availability. No Google write calls were made.
 
 ## Supported production boundary
 
