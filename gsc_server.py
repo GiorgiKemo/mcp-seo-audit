@@ -2656,12 +2656,17 @@ async def _load_crawl_robots(origin: str):
         if status == 429 or status >= 500 or 300 <= status < 400:
             return None, {"url": url, "status": status, "state": "unavailable"}
         policy = RobotsPolicy(response.text if 200 <= status < 300 else "")
-        return policy, {"url": url, "status": status, "state": "loaded" if status < 300 else "missing",
-                        "truncated": policy.truncated, "sitemaps": [
-                            line.strip().split(":", 1)[1].split("#", 1)[0].strip()
-                            for line in response.text[:500 * 1024].splitlines()
-                            if line.strip().lower().startswith("sitemap:")
-                        ][:20] if 200 <= status < 300 else []}
+        meta = {
+            "url": url, "status": status, "state": "loaded" if status < 300 else "missing",
+            "truncated": policy.truncated, "sitemaps": [
+                line.strip().split(":", 1)[1].split("#", 1)[0].strip()
+                for line in response.text[:500 * 1024].splitlines()
+                if line.strip().lower().startswith("sitemap:")
+            ][:20] if 200 <= status < 300 else []
+        }
+        if str(response.url) != url:
+            meta["final_url"] = str(response.url)
+        return policy, meta
     except Exception as exc:
         return None, {"url": url, "state": "unavailable", "error": str(exc)}
 
@@ -2807,8 +2812,12 @@ async def _crawl_site_data(start_url: str, max_pages: int, respect_robots: bool 
                     "url": final_url,
                     "status": response.status_code,
                     "issues": [f"Non-HTML response ({content_type or 'unknown content type'})"],
+                    "notes": [],
                     "title": "",
                     "description": "",
+                    "word_count": 0,
+                    "images_missing_alt": 0,
+                    "links_missing_href": 0,
                 })
                 continue
 
@@ -2910,9 +2919,12 @@ async def _crawl_site_data(start_url: str, max_pages: int, respect_robots: bool 
                 "url": current,
                 "status": "ERROR",
                 "issues": [f"Fetch error: {str(exc)}"],
+                "notes": [],
                 "title": "",
                 "description": "",
                 "word_count": 0,
+                "images_missing_alt": 0,
+                "links_missing_href": 0,
             })
 
     for page in page_summaries:
@@ -3711,6 +3723,12 @@ async def get_server_status() -> Dict[str, Any]:
     tool_manager = getattr(mcp, "_tool_manager", None)
     if tool_manager and hasattr(tool_manager, "_tools"):
         tool_count = len(tool_manager._tools)
+    if not tool_count:
+        try:
+            tools = await mcp.list_tools()
+            tool_count = len(tools)
+        except Exception:
+            pass
     return {
         "version": "2.1.0", "transport": "stdio", "tool_count": tool_count,
         "write_tools_enabled": ENABLE_WRITE_TOOLS, "private_urls_allowed": ALLOW_PRIVATE_URLS,
