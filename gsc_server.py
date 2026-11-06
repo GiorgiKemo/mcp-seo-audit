@@ -710,6 +710,31 @@ def _googlebot_directives(robots_meta: str, googlebot_meta: str, x_robots: Any) 
     return directives
 
 
+def _split_http_link_header(header: str) -> List[str]:
+    parts = []
+    current = []
+    in_quote = False
+    in_angle = False
+    for char in header:
+        if char == '"' and not in_angle:
+            in_quote = not in_quote
+        elif char == '<' and not in_quote:
+            in_angle = True
+        elif char == '>' and not in_quote:
+            in_angle = False
+        elif char == ',' and not in_quote and not in_angle:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(char)
+    last = "".join(current).strip()
+    if last:
+        parts.append(last)
+    return parts
+
+
 def _parse_http_link_headers(headers: Any) -> Tuple[List[str], List[Tuple[str, str]]]:
     """Extract canonical URLs and alternate hreflang pairs from RFC 8288 Link headers."""
     if hasattr(headers, "get_list"):
@@ -725,7 +750,7 @@ def _parse_http_link_headers(headers: Any) -> Tuple[List[str], List[Tuple[str, s
     for header in header_values:
         if not header:
             continue
-        for part in re.split(r",(?![^<]*>)", header):
+        for part in _split_http_link_header(header):
             match = re.match(r"^\s*<([^>]+)>\s*(.*)$", part.strip())
             if not match:
                 continue
@@ -889,14 +914,12 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
             issues.append("Canonical URL contains a fragment")
         if parsed_final.scheme == "https" and parsed_canonical.scheme == "http":
             issues.append("Canonical URL uses http on an https page")
-            notes.append("Canonical URL uses http on an https page")
         if (
             parsed_canonical.netloc
             and parsed_canonical.netloc != parsed_final.netloc
             and not _url_is_local_or_private(final_url)
         ):
             issues.append(f"Canonical points to another host: {canonical_url}")
-            notes.append(f"Canonical points to another host: {canonical_url}")
     else:
         if canonical_in_body_only:
             issues.append("Canonical link tag found only in body; Google ignores canonical tags outside <head>")
@@ -3093,6 +3116,8 @@ async def audit_live_site(url: str, crawl_pages: int = 5, include_lighthouse: bo
         discovered_sitemap = None
 
     if discovered_sitemap:
+        if not urlsplit(discovered_sitemap).scheme:
+            discovered_sitemap = urljoin(origin, discovered_sitemap)
         lines.append(await analyze_sitemap(discovered_sitemap, sample_urls=3))
     else:
         lines.append("No sitemap discovered via robots.txt.")

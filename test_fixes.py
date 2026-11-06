@@ -290,6 +290,36 @@ Allow: /public
             output = asyncio.run(gs.inspect_robots_txt("https://example.com"))
             self.assertIn("Google treats 429 and 5xx server errors on robots.txt as a full crawl block", output)
 
+    def test_http_link_header_quoted_comma_splitting(self):
+        header = '<https://example.com/other>; rel="canonical"; title="Some title, with a comma", <https://example.com/alt>; rel="alternate"; hreflang="es"'
+        canonicals, hreflangs = gs._parse_http_link_headers({"link": header})
+        self.assertEqual(canonicals, ["https://example.com/other"])
+        self.assertEqual(hreflangs, [("es", "https://example.com/alt")])
+
+    def test_audit_live_site_relative_sitemap_resolution(self):
+        import asyncio
+        robots_resp = MagicMock()
+        robots_resp.status_code = 200
+        robots_resp.text = "User-agent: *\nAllow: /\nSitemap: /sitemap.xml"
+
+        with unittest.mock.patch("gsc_server._fetch_url", new_callable=AsyncMock) as mock_fetch, \
+             unittest.mock.patch("gsc_server.analyze_page_seo", new_callable=AsyncMock) as mock_page, \
+             unittest.mock.patch("gsc_server.inspect_robots_txt", new_callable=AsyncMock) as mock_robots, \
+             unittest.mock.patch("gsc_server.analyze_sitemap", new_callable=AsyncMock) as mock_sitemap, \
+             unittest.mock.patch("gsc_server.get_pagespeed_insights", new_callable=AsyncMock) as mock_psi, \
+             unittest.mock.patch("gsc_server.crawl_site_seo", new_callable=AsyncMock) as mock_crawl:
+
+            mock_fetch.return_value = robots_resp
+            mock_page.return_value = "Page SEO"
+            mock_robots.return_value = "Robots info"
+            mock_sitemap.return_value = "Sitemap info"
+            mock_psi.return_value = "PSI info"
+            mock_crawl.return_value = "Crawl info"
+
+            output = asyncio.run(gs.audit_live_site("https://example.com"))
+            mock_sitemap.assert_called_once_with("https://example.com/sitemap.xml", sample_urls=3)
+            self.assertIn("Live SEO audit for https://example.com", output)
+
 
 if __name__ == "__main__":
     unittest.main()
