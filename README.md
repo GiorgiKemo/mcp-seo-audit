@@ -5,7 +5,7 @@
 [![Tests and package build](https://github.com/GiorgiKemo/mcp-seo-audit/actions/workflows/tests.yml/badge.svg)](https://github.com/GiorgiKemo/mcp-seo-audit/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server for technical SEO audits, JavaScript rendering, Search Console analytics, performance checks, and recurring monitoring. Its **43 tools** return evidence, affected URLs, suggested fixes, and explicit coverage limits.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server for technical SEO audits, JavaScript rendering, Search Console analytics, performance checks, and recurring monitoring. Its **44 tools** return evidence, affected URLs, suggested fixes, and explicit coverage limits.
 
 **Current source version: 2.1.0.** Install this checkout to use the features below. A GitHub update does not publish a PyPI package or MCP Registry release; `uvx mcp-seo-audit` can still resolve an older published version.
 

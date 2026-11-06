@@ -1,0 +1,19 @@
+**Verdict: not ready for production.** Most Round 2 changes are present, but the robots inspection still gives an incorrect “blocks all” result in a common case, and the updated code contains report-breaking input handling and diagnostic regressions.
+
+Findings, in priority order:
+
+1. **High — A malformed canonical can fail the entire audit.** In [seo_reporting.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/seo_reporting.py:178), accessing `parsed_t.port` raises `ValueError` for a page-supplied canonical such as `https://example.com:bad/path`. I reproduced the exception in `build_audit_report`; the public audit tool returns an error instead of the report. Validate URLs and handle malformed ports before lookup.
+
+2. **High — Oversized breadcrumb positions can still raise `ValueError`.** [seo_diagnostics.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/seo_diagnostics.py:326) accepts an arbitrarily long digit string and converts it with `int()`. On supported Python 3.11+ installations with the default integer-string limit, a sufficiently long value raises. Bound or safely catch the conversion. The new [Unicode test](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/test_fixes.py:167) has only one breadcrumb item, so validation exits before checking its position; it does not test the claimed fix.
+
+3. **Medium — Robots inspection equates blocking `/` with blocking every path.** [gsc_server.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/gsc_server.py:2435) reports “Blocks all crawling: YES” for `Disallow: /` followed by `Allow: /public`, although `/public` is crawlable. The policy no longer gets overwritten, but this conclusion remains incorrect.
+
+4. **Medium — Partial renders are treated as eligible diagnostic evidence.** [seo_diagnostics.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/seo_diagnostics.py:119) no longer requires `status == "complete"` and ignores JavaScript errors and resource redirects. Those conditions can produce a partial render, yet hreflang and structured-data findings are emitted from it. I reproduced findings for a page marked `failed`. This also conflicts with the completeness checks in reporting.
+
+5. **Medium — Canonical lookup conflates distinct ports.** [seo_reporting.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/seo_reporting.py:175) removes both ports 80 and 443 regardless of scheme. I reproduced a false `canonical_unavailable` finding where `https://example.com:80/target` was matched to `https://example.com/target`. Strip only the default port for the corresponding scheme.
+
+6. **Medium — Non-alternate HTML links become hreflang diagnostics.** [gsc_server.py](/Users/nita/.gemini/antigravity/scratch/mcp-seo-audit/gsc_server.py:788) collects every head `<link>` with `hreflang` and `href`, without requiring `rel="alternate"`. These now flow into `alternate_languages`, producing spurious alternate-language findings. The prior diagnostic extraction checked the relation.
+
+The import, destructive tool annotation, group reset, 429 handling, shared crawl-delay grouping, HTTP-header hreflang propagation, slash preservation, and issue-rule wiring are present in the code. Relative-versus-absolute canonical deduplication is implemented for the stated basic case, but the new tests do not directly verify several of these end-to-end. The `²` validation itself rejects that character when exercised with two items; its supplied regression test does not reach that branch.
+
+**Verification limits:** all nine requested files passed an AST syntax parse, and I ran focused reproductions for the malformed port, port conflation, robots policy, and incomplete-render behavior. I could not run the full test suite or the 12 new tests: the available interpreter is Python 3.9, the project requires Python 3.11+, and `pytest` is unavailable. Fix the findings and run the complete suite under a supported Python version before release.

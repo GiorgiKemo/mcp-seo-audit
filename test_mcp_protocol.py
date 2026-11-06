@@ -83,7 +83,7 @@ def test_stdio_audit_and_fix_comparison(audit_http_fixture, tmp_path):
                 initialized = await session.initialize()
                 assert initialized.serverInfo.name == "mcp-seo-audit"
                 registered = {tool.name: tool for tool in (await session.list_tools()).tools}
-                assert len(registered) == 43
+                assert len(registered) == 44
                 assert all(tool.annotations is not None for tool in registered.values())
                 assert registered["get_seo_audit_report"].annotations.readOnlyHint is True
                 assert registered["compare_seo_audits"].annotations.openWorldHint is False

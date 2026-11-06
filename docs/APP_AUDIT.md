@@ -6,7 +6,7 @@ Date: 2026-09-27. Scope: the local Python MCP server, its 30 original tools, pac
 
 The server has useful breadth across Search Console, page inspection and performance. Its biggest weakness was trust in the results: passing mocked tests did not catch unsupported API parameters, incorrect time windows, false missing-data conclusions, or incomplete crawl coverage. Text-only findings also made it difficult to turn an audit into a repair backlog and verify subsequent changes.
 
-Version 2.1.0 addresses these foundations and the follow-up production backlog, bringing the server to 43 tools. The supported deployment is a trusted, single-user local stdio MCP process with an optional separately operated monitoring worker. This audit does not establish competitive superiority, hosted multi-tenant readiness, or live Google account access. No PyPI publication, Google write calls, account changes, or paid services were performed.
+Version 2.1.0 addresses these foundations and the follow-up production backlog, bringing the server to 44 tools. The supported deployment is a trusted, single-user local stdio MCP process with an optional separately operated monitoring worker. This audit does not establish competitive superiority, hosted multi-tenant readiness, or live Google account access. No PyPI publication, Google write calls, account changes, or paid services were performed.
 
 ## Findings and implemented changes
 

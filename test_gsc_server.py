@@ -1363,7 +1363,7 @@ class TestEdgeCases:
 
     def test_module_has_43_tools(self):
         tools = list(gs.mcp._tool_manager._tools.keys())
-        assert len(tools) == 43
+        assert len(tools) == 44
 
     def test_all_expected_tools_registered(self):
         tools = set(gs.mcp._tool_manager._tools.keys())
@@ -1380,7 +1380,7 @@ class TestEdgeCases:
             "find_striking_distance_keywords", "detect_cannibalization", "split_branded_queries",
             "site_audit", "reauthenticate", "get_seo_audit_report", "compare_seo_audits",
             "get_server_status", "get_search_analytics_snapshot", "prioritize_audit_issues",
-            "create_audit_project", "list_audit_projects", "set_audit_schedule", "run_project_audit",
+            "create_audit_project", "delete_audit_project", "list_audit_projects", "set_audit_schedule", "run_project_audit",
             "list_project_audits", "get_project_audit", "compare_project_audits", "list_audit_events",
         }
         assert tools == expected

@@ -324,10 +324,11 @@ def enrich_report(report):
                             fields.append(prefix + ".@type")
                             continue
                         position = entry.get("position")
-                        if type(position) is not int or position < 1:
+                        valid_pos = (isinstance(position, int) and not isinstance(position, bool) and position >= 1) or (isinstance(position, str) and bool(re.fullmatch(r"[1-9]\d{0,6}", position.strip())))
+                        if not valid_pos:
                             fields.append(prefix + ".position")
                         else:
-                            positions.append(position)
+                            positions.append(int(position))
                         item = resolve(entry.get("item"))
                         if not _text(entry.get("name")) and not unresolved(item) and not (isinstance(item, dict) and _text(item.get("name"))):
                             fields.append(prefix + ".name")
@@ -348,7 +349,7 @@ def enrich_report(report):
                             continue
                         try:
                             value = node[field]
-                            if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}(?:T|$)", value):
+                            if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}(?:[T ]|$)", value):
                                 raise ValueError
                             datetime.fromisoformat(value.replace("Z", "+00:00"))
                         except ValueError:

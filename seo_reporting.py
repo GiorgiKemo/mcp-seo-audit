@@ -3,7 +3,7 @@
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from seo_diagnostics import enrich_report
 
@@ -38,6 +38,14 @@ RULES = [
     ("Page instructs crawlers not to follow", "nofollow", "Confirm the nofollow directive is intended for this page."),
     ("Multiple canonical", "multiple_canonicals", "Emit one consistent canonical URL."),
     ("No canonical", "missing_canonical", "Consider a canonical URL where duplicates or URL variants exist."),
+    ("External redirect from", "external_redirect", "Review internal links pointing to external redirects."),
+    ("Redirect from", "robots_blocked_redirect", "Update links to point directly to allowed destinations, or update robots.txt."),
+    ("Canonical link tag found only in body", "canonical_in_body", "Place the canonical link inside <head>; search engines ignore canonical tags in <body>."),
+    ("Canonical URL is not absolute", "canonical_relative", "Use a consistent fully qualified absolute canonical URL."),
+    ("Canonical URL contains a fragment", "canonical_fragment", "Remove URL fragments (#) from the canonical destination."),
+    ("Canonical URL uses http on an https page", "canonical_http_downgrade", "Use HTTPS canonical URLs on secure sites."),
+    ("Canonical points to another host", "canonical_cross_domain", "Confirm cross-domain canonicalization is intentional."),
+    ("Canonical target encountered a fetch error", "canonical_target_unverified", "Verify the canonical target URL is accessible and responds successfully."),
     ("Canonical", "canonical_review", "Check the canonical destination and use a consistent absolute indexable URL."),
     ("Invalid JSON-LD", "invalid_json_ld", "Repair the JSON syntax and validate supported structured data separately."),
     ("Images missing alt", "missing_image_alt", "Add descriptive alt text to meaningful images; use empty alt for decoration."),
@@ -91,6 +99,12 @@ def build_audit_report(crawl):
         if page["state"] == "fetch_error":
             add("fetch_error", "high", page["issues"][0], url,
                 "Check availability, TLS and access restrictions, then rerun this URL.")
+        elif page["state"] == "external_redirect":
+            add("external_redirect", "medium", page["issues"][0], page.get("requested_url", url),
+                "Review internal links pointing to external redirects.")
+        elif page["state"] == "robots_blocked_redirect":
+            add("robots_blocked_redirect", "high", page["issues"][0], page.get("requested_url", url),
+                "Update links to point directly to allowed destinations, or update robots.txt.")
         if isinstance(page["status"], int) and page["status"] >= 400:
             add("http_error", "critical", f"HTTP status {page['status']}", url,
                 "Restore the intended response or update links to a working replacement.",
@@ -148,16 +162,52 @@ def build_audit_report(crawl):
                         "Differentiate metadata for distinct pages, or consolidate true duplicates.",
                         {"shared_with": [other for other in urls if other != url]})
 
-    observed = {p["requested_url"]: p for p in pages if p["state"] != "redirect_alias"}
-    observed.update({p["url"]: p for p in pages if p["state"] != "redirect_alias"})
+    def _normalize_canonical_key(raw_u: str) -> str:
+        try:
+            parsed = urlsplit(raw_u)
+            if not parsed.hostname:
+                return raw_u
+            try:
+                port = parsed.port
+            except (ValueError, TypeError):
+                port = None
+            scheme = parsed.scheme.lower()
+            default_port = 80 if scheme == "http" else (443 if scheme == "https" else None)
+            port_str = f":{port}" if port and port != default_port else ""
+            norm = f"{scheme}://{parsed.hostname.lower()}{port_str}{parsed.path}"
+            if parsed.query:
+                norm += f"?{parsed.query}"
+            return norm
+        except Exception:
+            return raw_u
+
+    observed = {}
+    for p in pages:
+        if p.get("state") != "redirect_alias":
+            for k in (p.get("requested_url"), p.get("url")):
+                if k:
+                    observed[k] = p
+                    norm_k = _normalize_canonical_key(k)
+                    if norm_k:
+                        observed.setdefault(norm_k, p)
+
     for page in candidates:
         for canonical in page.get("canonicals", []):
             target_url = urljoin(page["url"], canonical).split("#", 1)[0]
             target = observed.get(target_url)
-            if target and (target.get("noindex") or (isinstance(target["status"], int) and target["status"] >= 400)):
+            if not target:
+                norm_t = _normalize_canonical_key(target_url)
+                if norm_t:
+                    target = observed.get(norm_t)
+
+            if target and (target.get("noindex") or (isinstance(target.get("status"), int) and target["status"] >= 400)):
                 add("canonical_unavailable", "high", f"Canonical target is noindex or HTTP error: {target_url}",
                     page["url"], "Point canonical to an available, indexable version of this content.",
                     {"target": target_url, "target_status": target["status"], "target_noindex": target.get("noindex", False)})
+            elif target and target.get("status") == "ERROR":
+                add("canonical_target_unverified", "medium", f"Canonical target encountered a fetch error: {target_url}",
+                    page["url"], "Verify the canonical target URL is accessible and responds successfully.",
+                    {"target": target_url, "target_status": "ERROR"})
 
     issues = sorted(grouped.values(), key=lambda i: (SEVERITIES[i["severity"]], -len(i["affected_urls"]), i["rule_id"]))
     for item in issues:
@@ -246,7 +296,7 @@ def compare_audit_reports(baseline, current):
                         if any(not isinstance(peer, str) for peer in issue["affected_urls"]):
                             raise ValueError("Affected URLs must be strings.")
                         related.update(issue["affected_urls"])
-                elif rule == "canonical_unavailable":
+                elif rule in {"canonical_unavailable", "canonical_target_unverified"}:
                     targets = [item.get("target") for item in relevant]
                     if not targets or any(not isinstance(target, str) for target in targets):
                         dependencies[key] = None

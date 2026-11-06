@@ -21,7 +21,7 @@ from seo_reporting import compare_audit_reports
 MAX_REPORT_BYTES = 10 * 1024 * 1024
 MAX_PROJECTS = 100
 MAX_EVENTS_PER_PROJECT = 500
-LEASE_SECONDS = 660
+LEASE_SECONDS = 900
 _PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _AUDIT_ID = re.compile(r"[a-f0-9]{32}\Z")
 
@@ -177,6 +177,16 @@ class AuditStore:
         validate_project_id(project_id)
         with self._connection() as conn:
             return self._project(conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone())
+
+    def delete_project(self, project_id):
+        validate_project_id(project_id)
+        with self._connection(write=True) as conn:
+            conn.execute("DELETE FROM events WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM audits WHERE project_id=?", (project_id,))
+            changed = conn.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
+            if changed.rowcount != 1:
+                raise ValueError("Project not found.")
+            return {"project_id": project_id, "deleted": True}
 
     def set_schedule(self, project_id, enabled=False, interval_seconds=86400, now=None):
         validate_project_id(project_id)

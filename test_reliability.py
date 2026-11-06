@@ -221,10 +221,10 @@ def test_registered_mcp_tools_expose_safety_annotations():
     write_tools = {
         "add_site", "delete_site", "submit_sitemap", "delete_sitemap",
         "request_indexing", "request_removal", "batch_request_indexing", "reauthenticate",
-        "create_audit_project", "set_audit_schedule", "run_project_audit",
+        "create_audit_project", "set_audit_schedule", "run_project_audit", "delete_audit_project",
     }
-    destructive_tools = {"delete_site", "delete_sitemap", "request_removal", "reauthenticate", "run_project_audit"}
-    local_tools = {"compare_seo_audits", "get_server_status", "create_audit_project", "list_audit_projects", "list_project_audits", "get_project_audit", "compare_project_audits", "list_audit_events"}
+    destructive_tools = {"delete_site", "delete_sitemap", "request_removal", "reauthenticate", "run_project_audit", "delete_audit_project"}
+    local_tools = {"compare_seo_audits", "get_server_status", "create_audit_project", "list_audit_projects", "list_project_audits", "get_project_audit", "compare_project_audits", "list_audit_events", "delete_audit_project"}
     repeatable_writes = {"add_site", "delete_site", "delete_sitemap"}
     assert write_tools <= tools.keys()
     for name, tool in tools.items():

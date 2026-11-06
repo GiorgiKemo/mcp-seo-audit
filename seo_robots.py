@@ -92,7 +92,7 @@ class RobotsPolicy:
                     agents, rules, delays = [], [], []
                     has_rule = False
                 # Ignore suffixes such as /1.0 and * after a product token.
-                token = re.match(r"[a-z_-]+", value.lower())
+                token = re.match(r"[a-z0-9_-]+", value.lower())
                 if value == "*":
                     agents.append("*")
                 elif token:
@@ -120,11 +120,23 @@ class RobotsPolicy:
             groups.append((agents, rules, delays))
 
         crawler = user_agent.lower()
+        crawler_match = re.match(r"[a-z0-9_-]+", crawler)
+        crawler_token = crawler_match.group() if crawler_match else crawler
         selected = []
         best = -1
         for agents, rules, delays in groups:
-            specificity = max((0 if agent == "*" else len(agent)
-                               for agent in agents if agent == "*" or agent in crawler), default=-1)
+            specificity = -1
+            for agent in agents:
+                if agent == "*":
+                    score = 0
+                elif agent == crawler_token:
+                    score = 1000 + len(agent)
+                elif crawler_token.startswith(agent + "-"):
+                    score = len(agent)
+                else:
+                    score = -1
+                if score > specificity:
+                    specificity = score
             if specificity > best:
                 best, selected = specificity, [(rules, delays)]
             elif specificity == best and specificity >= 0:

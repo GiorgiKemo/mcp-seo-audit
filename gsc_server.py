@@ -537,6 +537,15 @@ def _buffer_decoded_response(response: httpx.Response, content: bytes) -> httpx.
     )
 
 
+class RedirectBlocked(Exception):
+    """Raised when following a redirect is aborted by policy before fetching."""
+    def __init__(self, target: str, reason: str, response: httpx.Response):
+        super().__init__(reason)
+        self.target = target
+        self.reason = reason
+        self.response = response
+
+
 async def _fetch_url(
     url: str,
     *,
@@ -572,7 +581,11 @@ async def _fetch_url(
                         return _buffer_decoded_response(response, b"")
                     next_url = urljoin(str(response.url), location)
                     if redirect_validator is not None:
-                        redirect_validator(next_url)
+                        try:
+                            redirect_validator(next_url)
+                        except Exception as exc:
+                            buffered = _buffer_decoded_response(response, b"")
+                            raise RedirectBlocked(next_url, str(exc), buffered) from exc
                     current_url = _validate_fetchable_public_url(next_url, resolve_dns=False)
                     redirects_followed += 1
                     if redirect_delay:
@@ -697,6 +710,41 @@ def _googlebot_directives(robots_meta: str, googlebot_meta: str, x_robots: Any) 
     return directives
 
 
+def _parse_http_link_headers(headers: Any) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """Extract canonical URLs and alternate hreflang pairs from RFC 8288 Link headers."""
+    if hasattr(headers, "get_list"):
+        header_values = headers.get_list("link")
+    elif isinstance(headers, dict):
+        raw = headers.get("link", "")
+        header_values = [raw] if raw else []
+    else:
+        header_values = []
+
+    canonicals: List[str] = []
+    hreflangs: List[Tuple[str, str]] = []
+    for header in header_values:
+        if not header:
+            continue
+        for part in re.split(r",(?![^<]*>)", header):
+            match = re.match(r"^\s*<([^>]+)>\s*(.*)$", part.strip())
+            if not match:
+                continue
+            target_url = match.group(1).strip()
+            params = match.group(2)
+            rel_match = re.search(r'\brel=(?:"([^"]+)"|([^\s;]+))', params, re.I)
+            rel = (rel_match.group(1) or rel_match.group(2) or "").lower() if rel_match else ""
+            rel_tokens = rel.split()
+            if "canonical" in rel_tokens:
+                canonicals.append(target_url)
+            if "alternate" in rel_tokens:
+                lang_match = re.search(r'\bhreflang=(?:"([^"]+)"|([^\s;]+))', params, re.I)
+                if lang_match:
+                    lang = (lang_match.group(1) or lang_match.group(2) or "").strip()
+                    if lang:
+                        hreflangs.append((lang, target_url))
+    return canonicals, hreflangs
+
+
 def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, str], html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     base_tag = soup.find("base", href=True)
@@ -707,8 +755,11 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
     html_lang = _clean_text(html_tag.get("lang")) if html_tag else ""
 
     title_text = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
+    http_canonicals, http_hreflangs = _parse_http_link_headers(headers)
+    head_scope = soup.head if soup.head else soup
+
     canonical_tags = []
-    for link in soup.find_all("link"):
+    for link in head_scope.find_all("link"):
         rel = link.get("rel") or []
         rel_values = [str(item).lower() for item in (rel if isinstance(rel, list) else [rel])]
         if "canonical" in rel_values:
@@ -716,12 +767,40 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
             if href:
                 canonical_tags.append(href)
 
+    canonical_in_body_only = False
+    if not canonical_tags and soup.body:
+        for link in soup.body.find_all("link"):
+            rel = link.get("rel") or []
+            rel_values = [str(item).lower() for item in (rel if isinstance(rel, list) else [rel])]
+            if "canonical" in rel_values and _clean_text(link.get("href")):
+                canonical_in_body_only = True
+                break
+
+    canonical_resolved = {urljoin(final_url, tag) for tag in canonical_tags}
+    for h_can in http_canonicals:
+        resolved_h = urljoin(final_url, h_can)
+        if resolved_h not in canonical_resolved:
+            canonical_tags.append(h_can)
+            canonical_resolved.add(resolved_h)
+
     hreflangs = []
-    for link in soup.find_all("link"):
+    seen_hreflangs = set()
+    for link in head_scope.find_all("link"):
+        rel_vals = {r.lower() for r in (link.get("rel") if isinstance(link.get("rel"), list) else [link.get("rel")]) if r}
+        if "alternate" not in rel_vals:
+            continue
         hreflang = _clean_text(link.get("hreflang"))
         href = _clean_text(link.get("href"))
         if hreflang and href:
-            hreflangs.append((hreflang, href))
+            pair_key = (hreflang.lower(), urljoin(final_url, href))
+            if pair_key not in seen_hreflangs:
+                hreflangs.append((hreflang, href))
+                seen_hreflangs.add(pair_key)
+    for h_lang, h_url in http_hreflangs:
+        pair_key = (h_lang.lower(), urljoin(final_url, h_url))
+        if pair_key not in seen_hreflangs:
+            hreflangs.append((h_lang, h_url))
+            seen_hreflangs.add(pair_key)
 
     headings = {
         "h1": [_clean_text(tag.get_text(" ", strip=True)) for tag in visible_soup.find_all("h1") if _clean_text(tag.get_text(" ", strip=True))],
@@ -809,14 +888,18 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
         if parsed_canonical.fragment:
             issues.append("Canonical URL contains a fragment")
         if parsed_final.scheme == "https" and parsed_canonical.scheme == "http":
+            issues.append("Canonical URL uses http on an https page")
             notes.append("Canonical URL uses http on an https page")
         if (
             parsed_canonical.netloc
             and parsed_canonical.netloc != parsed_final.netloc
             and not _url_is_local_or_private(final_url)
         ):
+            issues.append(f"Canonical points to another host: {canonical_url}")
             notes.append(f"Canonical points to another host: {canonical_url}")
     else:
+        if canonical_in_body_only:
+            issues.append("Canonical link tag found only in body; Google ignores canonical tags outside <head>")
         notes.append("No canonical tag found")
 
     directives = _googlebot_directives(robots_meta, googlebot_meta, x_robots_values)
@@ -896,10 +979,8 @@ def _analyze_html_document(final_url: str, status_code: int, headers: Dict[str, 
         "nofollow": "nofollow" in directives,
         "structured_data": _json_ld_documents(soup),
         "alternate_languages": [
-            {"language": _clean_text(link.get("hreflang")), "url": urljoin(final_url, link.get("href", "")),
-             "raw_url": link.get("href", "")}
-            for link in (soup.head.find_all("link", hreflang=True, href=True) if soup.head else [])
-            if "alternate" in [str(rel).lower() for rel in link.get("rel", [])]
+            {"language": lang, "url": urljoin(final_url, target_url), "raw_url": target_url}
+            for lang, target_url in hreflangs
         ],
     }
 
@@ -962,6 +1043,9 @@ def _parse_sitemap_document(xml_text: str) -> Dict[str, Any]:
         if not urls:
             raise ValueError("Plain-text sitemap contains no URLs.")
         return {"type": "urlset", "sitemaps": [], "urls": urls, "lastmod_count": 0}
+
+    if "<!DOCTYPE" in sitemap_text.upper() or "<!ENTITY" in sitemap_text.upper():
+        raise ValueError("DTD and entity declarations are not allowed in sitemaps.")
 
     root = ET.fromstring(sitemap_text)
     root_name = _local_name(root.tag)
@@ -1668,6 +1752,20 @@ async def inspect_url(site_url: str, page_url: str) -> str:
         return f"Error inspecting URL: {str(e)}"
 
 
+def _parse_batch_urls(urls_input: Any) -> List[str]:
+    if isinstance(urls_input, list):
+        return [str(u).strip() for u in urls_input if str(u).strip()]
+    raw = str(urls_input or "").strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(u).strip() for u in parsed if str(u).strip()]
+        except Exception:
+            pass
+    return [u.strip() for u in raw.splitlines() if u.strip()]
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def batch_inspect_urls(site_url: str, urls: str) -> str:
     """
@@ -1676,11 +1774,11 @@ async def batch_inspect_urls(site_url: str, urls: str) -> str:
 
     Args:
         site_url: Exact GSC property URL (e.g. "sc-domain:example.com")
-        urls: List of URLs to inspect, one per line
+        urls: List of URLs to inspect, one per line or a JSON array of strings
     """
     try:
         service = await google_service(get_gsc_service)
-        url_list = [u.strip() for u in urls.split("\n") if u.strip()]
+        url_list = _parse_batch_urls(urls)
 
         if not url_list:
             return "No URLs provided."
@@ -1919,13 +2017,13 @@ async def batch_request_indexing(urls: str) -> str:
     Default quota: 200/day. Only for pages with JobPosting or BroadcastEvent structured data.
 
     Args:
-        urls: List of URLs to index, one per line (max 100 per batch)
+        urls: List of URLs to index, one per line or a JSON array of strings (max 100 per batch)
     """
     gate = _require_write_tools_enabled("batch request indexing")
     if gate:
         return gate
     try:
-        url_list = [u.strip() for u in urls.split("\n") if u.strip()]
+        url_list = _parse_batch_urls(urls)
 
         if not url_list:
             return "No URLs provided."
@@ -2319,21 +2417,32 @@ async def inspect_robots_txt(url_or_origin: str) -> str:
     robots_url = _origin_from_url(url_or_origin).rstrip("/") + "/robots.txt"
     try:
         response = await _fetch_url(robots_url)
+        if response.status_code == 429 or response.status_code >= 500:
+            return (
+                f"robots.txt at {robots_url} returned temporary error (HTTP {response.status_code}).\n"
+                "Google treats 429 and 5xx server errors on robots.txt as a full crawl block until the server recovers."
+            )
         if response.status_code == 404:
             return (
                 f"robots.txt not found at {robots_url} (HTTP 404).\n"
                 "Google treats a missing robots.txt as no crawl restrictions."
             )
+        if 400 <= response.status_code < 500:
+            return (
+                f"robots.txt not available at {robots_url} (HTTP {response.status_code}).\n"
+                "Google treats 4xx client errors (missing robots.txt) as no crawl restrictions."
+            )
 
         text = response.text
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        policy = RobotsPolicy(text, user_agent="*")
         sitemap_urls = []
         wildcard_disallows = []
         wildcard_allows = []
         warnings = []
-        applies_to_wildcard = False
+        current_agents = []
+        has_rules = False
 
-        for raw_line in lines:
+        for raw_line in text.splitlines():
             line = raw_line.split("#", 1)[0].strip()
             if not line or ":" not in line:
                 continue
@@ -2341,17 +2450,26 @@ async def inspect_robots_txt(url_or_origin: str) -> str:
             key = key.strip().lower()
             value = value.strip()
             if key == "user-agent":
-                applies_to_wildcard = value.lower() == "*"
-            elif key == "disallow" and applies_to_wildcard:
-                wildcard_disallows.append(value)
-            elif key == "allow" and applies_to_wildcard:
-                wildcard_allows.append(value)
+                if has_rules:
+                    current_agents = []
+                    has_rules = False
+                token = value.lower().split("/")[0].strip()
+                current_agents.append(token)
+            elif key in {"allow", "disallow"}:
+                has_rules = True
+                if "*" in current_agents:
+                    if key == "disallow" and value:
+                        wildcard_disallows.append(value)
+                    elif key == "allow" and value:
+                        wildcard_allows.append(value)
             elif key == "sitemap":
-                sitemap_urls.append(value)
+                if value and value not in sitemap_urls:
+                    sitemap_urls.append(value)
             elif key == "noindex":
                 warnings.append("Found noindex directive in robots.txt. Google no longer supports this.")
 
-        blocked_all = any(path == "/" for path in wildcard_disallows)
+        blocked_all = not policy.can_fetch("/") and not wildcard_allows
+
         output = [
             f"robots.txt inspection for {robots_url}",
             f"HTTP status: {response.status_code}",
@@ -2553,7 +2671,11 @@ async def _crawl_site_data(start_url: str, max_pages: int, respect_robots: bool 
     policy = RobotsPolicy("")
     robots = {"state": "ignored_by_request"}
     if respect_robots:
-        policy, robots = await _load_crawl_robots(origin)
+        try:
+            async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
+                policy, robots = await _load_crawl_robots(origin)
+        except TimeoutError:
+            policy, robots = None, {"url": origin.rstrip("/") + "/robots.txt", "state": "unavailable", "error": "robots_timeout"}
         if policy is None:
             termination = "robots_unavailable"
         elif policy.crawl_delay is not None and policy.crawl_delay > 10:
@@ -2714,6 +2836,51 @@ async def _crawl_site_data(start_url: str, max_pages: int, respect_robots: bool 
                         discovered.add(linked)
                         depths[linked] = depths[current] + 1 if depths[current] is not None else None
                         queue.append(linked)
+        except RedirectBlocked as blocked_redirect:
+            dest_url = blocked_redirect.target
+            resp_code = blocked_redirect.response.status_code
+            common = {"requested_url": current, "depth": depths[current], "linked_from": []}
+            if not _url_matches_origin(dest_url, origin):
+                page_summaries.append({
+                    **common, "state": "external_redirect",
+                    "url": dest_url,
+                    "status": resp_code,
+                    "issues": [f"External redirect from {current}"],
+                    "notes": [],
+                    "title": "",
+                    "description": "",
+                    "word_count": 0,
+                    "images_missing_alt": 0,
+                    "links_missing_href": 0,
+                })
+                continue
+            if respect_robots and not policy.can_fetch(dest_url):
+                blocked.append(dest_url)
+                page_summaries.append({
+                    **common, "state": "robots_blocked_redirect",
+                    "url": dest_url,
+                    "status": resp_code,
+                    "issues": [f"Redirect from {current} to {dest_url} blocked by robots.txt"],
+                    "notes": [],
+                    "title": "",
+                    "description": "",
+                    "word_count": 0,
+                    "images_missing_alt": 0,
+                    "links_missing_href": 0,
+                })
+                continue
+            page_summaries.append({
+                **common, "state": "fetch_error",
+                "url": current,
+                "status": "ERROR",
+                "issues": [f"Fetch error: {blocked_redirect.reason}"],
+                "notes": [],
+                "title": "",
+                "description": "",
+                "word_count": 0,
+                "images_missing_alt": 0,
+                "links_missing_href": 0,
+            })
         except Exception as exc:
             page_summaries.append({
                 "requested_url": current, "depth": depths[current], "linked_from": [], "state": "fetch_error",
@@ -3515,8 +3682,12 @@ async def get_server_status() -> Dict[str, Any]:
     Credential presence does not prove current Google permissions or quota.
     """
     import importlib.util
+    tool_count = 0
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    if tool_manager and hasattr(tool_manager, "_tools"):
+        tool_count = len(tool_manager._tools)
     return {
-        "version": "2.1.0", "transport": "stdio", "tool_count": len(mcp._tool_manager._tools),
+        "version": "2.1.0", "transport": "stdio", "tool_count": tool_count,
         "write_tools_enabled": ENABLE_WRITE_TOOLS, "private_urls_allowed": ALLOW_PRIVATE_URLS,
         "browser_package_installed": importlib.util.find_spec("playwright") is not None,
         "oauth_client_present": os.path.isfile(OAUTH_CLIENT_SECRETS_FILE),

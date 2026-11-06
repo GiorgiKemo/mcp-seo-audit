@@ -18,19 +18,28 @@ async def execute_claim(store, claim, audit_callback):
     """Run one claimed audit. Cancellation records state, releases its lease and propagates."""
     project, token = claim["project"], claim["token"]
     project_id = project["project_id"]
+
+    async def safe_finish_failure(error_type):
+        try:
+            return await asyncio.to_thread(store.finish_failure, project_id, token, error_type)
+        except (ValueError, sqlite3.Error):
+            return {"project_id": project_id, "error": error_type, "lease_status": "expired_or_preempted"}
+
     try:
         report = await asyncio.wait_for(
             audit_callback(start_url=project["start_url"], **project["settings"]), timeout=AUDIT_TIMEOUT_SECONDS)
         if not isinstance(report, dict) or "error" in report:
-            return await asyncio.to_thread(store.finish_failure, project_id, token, "audit_failed")
+            return await safe_finish_failure("audit_failed")
         # Unavailable robots or an entirely failed crawl is not a successful baseline.
         if not any(page.get("state") == "html" and isinstance(page.get("status"), int) and 200 <= page["status"] < 300
                    for page in report.get("pages", []) if isinstance(page, dict)):
-            return await asyncio.to_thread(store.finish_failure, project_id, token, "audit_failed")
+            return await safe_finish_failure("audit_failed")
         try:
             return await asyncio.to_thread(store.finish_success, project_id, token, report)
-        except (ValueError, TypeError, KeyError, RecursionError):
-            return await asyncio.to_thread(store.finish_failure, project_id, token, "invalid_report")
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            if isinstance(exc, ValueError) and "lease" in str(exc).lower():
+                return {"project_id": project_id, "error": "lease_expired", "failure_count": project.get("failure_count", 0)}
+            return await safe_finish_failure("invalid_report")
     except asyncio.CancelledError:
         try:
             await asyncio.shield(asyncio.to_thread(store.finish_failure, project_id, token, "cancelled"))
@@ -38,10 +47,10 @@ async def execute_claim(store, claim, audit_callback):
             pass  # A replaced lease belongs to another worker; never disturb it.
         raise
     except TimeoutError:
-        return await asyncio.to_thread(store.finish_failure, project_id, token, "audit_timeout")
+        return await safe_finish_failure("audit_timeout")
     except Exception:
         # Provider exceptions can contain signed URLs or credentials; do not persist them.
-        return await asyncio.to_thread(store.finish_failure, project_id, token, "audit_failed")
+        return await safe_finish_failure("audit_failed")
 
 
 async def run_due_audits(store, audit_callback, limit=25):
@@ -83,6 +92,11 @@ def register_monitoring_tools(mcp, audit_callback, store=None):
         Rendered modes require the optional browser dependency and installed Chromium.
         """
         return await invoke("create_project", project_id, start_url, max_pages, render_mode, include_sitemaps, retention)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+    async def delete_audit_project(project_id: str) -> dict:
+        """Permanently delete a local audit project and its retained snapshots and events."""
+        return await invoke("delete_project", project_id)
 
     @mcp.tool(annotations=read)
     async def list_audit_projects() -> dict:

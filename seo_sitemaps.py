@@ -56,7 +56,13 @@ def _parse_document(body):
     namespace = root.tag[:-len(name)]
     if name not in {"sitemapindex", "urlset"}:
         raise ValueError("Unsupported sitemap root element.")
-    if namespace not in {"", "{http://www.sitemaps.org/schemas/sitemap/0.9}"}:
+    KNOWN_NAMESPACES = {
+        "",
+        "{http://www.sitemaps.org/schemas/sitemap/0.9}",
+        "{https://www.sitemaps.org/schemas/sitemap/0.9}",
+        "{http://www.google.com/schemas/sitemap/0.84}",
+    }
+    if namespace not in KNOWN_NAMESPACES:
         raise ValueError("Unsupported sitemap XML namespace.")
     entry_name = "sitemap" if name == "sitemapindex" else "url"
     urls = []
